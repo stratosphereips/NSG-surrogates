@@ -1,0 +1,196 @@
+{
+  "schema_version": "nsg-state-graph/1.1",
+  "graph_model": "directed-property-graph",
+  "detail_level": "strategic",
+  "generated_at": 1788874615.91,
+  "agent_id": "agent:observed",
+  "local_host_id": "host:local",
+  "observation_root": "/observation",
+  "nodes": [
+    {
+      "id": "agent:observed",
+      "type": "agent",
+      "label": "observed agent",
+      "confidence": 1.0,
+      "attributes": {"agent_kind": "human-or-program", "observation_scope": "container"}
+    },
+    {
+      "id": "host:local",
+      "type": "host",
+      "label": "c0ffee123456",
+      "confidence": 1.0,
+      "attributes": {
+        "addresses": ["127.0.0.1", "::1", "10.0.0.5", "10.0.0.1", "192.168.50.2", "224.0.0.251"],
+        "control_mechanism": "local-container",
+        "controlled": true,
+        "interfaces": ["lo", "eth0"],
+        "local": true,
+        "names": ["c0ffee123456"]
+      }
+    },
+    {
+      "id": "host:ip:10.0.0.1",
+      "type": "host",
+      "label": "10.0.0.1",
+      "confidence": 0.98,
+      "attributes": {"addresses": ["10.0.0.1"], "address_type": "unicast", "local": false}
+    },
+    {
+      "id": "host:ip:10.0.0.9",
+      "type": "host",
+      "label": "10.0.0.9",
+      "confidence": 0.95,
+      "attributes": {"addresses": ["10.0.0.9"], "address_type": "unicast", "local": false}
+    },
+    {
+      "id": "host:name:db.internal",
+      "type": "host",
+      "label": "db.internal",
+      "confidence": 0.9,
+      "attributes": {"addresses": ["2001:db8::1"], "local": false, "names": ["db.internal"]}
+    },
+    {
+      "id": "host:ip:10.0.0.77",
+      "type": "host",
+      "label": "10.0.0.77",
+      "confidence": 0.3,
+      "attributes": {"addresses": ["10.0.0.77"], "local": false}
+    },
+    {
+      "id": "network:10.0.0.0/24",
+      "type": "network",
+      "label": "10.0.0.0/24",
+      "confidence": 0.98,
+      "attributes": {"cidr": "10.0.0.0/24", "knowledge_source": "interface", "version": 4}
+    },
+    {
+      "id": "network:0.0.0.0/0",
+      "type": "network",
+      "label": "0.0.0.0/0",
+      "confidence": 0.98,
+      "attributes": {"cidr": "0.0.0.0/0", "knowledge_source": "route", "version": 4}
+    },
+    {
+      "id": "network:8.8.8.0/24",
+      "type": "network",
+      "label": "8.8.8.0/24",
+      "confidence": 0.35,
+      "attributes": {
+        "cidr": "8.8.8.0/24",
+        "inferred": true,
+        "inference_method": "assumed-prefix",
+        "inferred_from": "8.8.8.8",
+        "version": 4
+      }
+    },
+    {
+      "id": "service:ssh-10.0.0.9",
+      "type": "service",
+      "label": "ssh tcp/22 on 10.0.0.9",
+      "confidence": 0.95,
+      "attributes": {
+        "host_id": "host:ip:10.0.0.9",
+        "port": 22,
+        "protocol": "tcp",
+        "service_name": "ssh",
+        "status": ["observed", "open"]
+      }
+    },
+    {
+      "id": "service:https-10.0.0.9",
+      "type": "service",
+      "label": "https tcp/443 on 10.0.0.9",
+      "confidence": 0.9,
+      "attributes": {
+        "host_id": "host:ip:10.0.0.9",
+        "port": 443,
+        "protocol": "tcp",
+        "service_name": ["https", "ssl"],
+        "status": ["observed", "open"]
+      }
+    },
+    {
+      "id": "service:pgsql-db",
+      "type": "service",
+      "label": "postgresql tcp/5432 on db.internal",
+      "confidence": 0.9,
+      "attributes": {
+        "host_id": "host:name:db.internal",
+        "port": 5432,
+        "protocol": "tcp",
+        "service_name": "postgresql"
+      }
+    },
+    {
+      "id": "data:secrets",
+      "type": "data",
+      "label": "/home/user/secrets.txt",
+      "confidence": 0.95,
+      "attributes": {
+        "host_id": "host:local",
+        "locator": "/home/user/secrets.txt",
+        "exists": true,
+        "sha256": "0f00",
+        "size": 128,
+        "operations": ["CREATE", "MODIFY"]
+      }
+    },
+    {
+      "id": "data:unstable",
+      "type": "data",
+      "label": "/home/user/scratch",
+      "confidence": 0.92,
+      "attributes": {
+        "host_id": "host:local",
+        "locator": "/home/user/scratch",
+        "exists": [true, false],
+        "operations": ["CREATE", "DELETE"]
+      }
+    },
+    {
+      "id": "data:noise",
+      "type": "data",
+      "label": "/tmp/apt.sig.XXXX",
+      "confidence": 0.92,
+      "attributes": {"host_id": "host:local", "locator": "/tmp/apt.sig.XXXX", "exists": true}
+    },
+    {
+      "id": "block:dns-drop",
+      "type": "block",
+      "label": "possible block: dns udp/53 on 10.0.0.1",
+      "confidence": 0.78,
+      "attributes": {
+        "hypothesis": true,
+        "reason": "network-no-reply",
+        "target_id": "service:ssh-10.0.0.9",
+        "zeek_state": "S0"
+      }
+    }
+  ],
+  "edges": [
+    {"id": "e1", "type": "CONTROLS", "source": "agent:observed", "target": "host:local", "confidence": 1.0},
+    {"id": "e2", "type": "KNOWS_HOST", "source": "agent:observed", "target": "host:local", "confidence": 1.0},
+    {"id": "e3", "type": "KNOWS_HOST", "source": "agent:observed", "target": "host:ip:10.0.0.1", "confidence": 0.98},
+    {"id": "e4", "type": "KNOWS_HOST", "source": "agent:observed", "target": "host:ip:10.0.0.9", "confidence": 0.95},
+    {"id": "e5", "type": "KNOWS_HOST", "source": "agent:observed", "target": "host:name:db.internal", "confidence": 0.9},
+    {"id": "e6", "type": "KNOWS_HOST", "source": "agent:observed", "target": "host:ip:10.0.0.77", "confidence": 0.3},
+    {"id": "e7", "type": "KNOWS_NETWORK", "source": "agent:observed", "target": "network:10.0.0.0/24", "confidence": 0.98},
+    {"id": "e8", "type": "KNOWS_NETWORK", "source": "agent:observed", "target": "network:0.0.0.0/0", "confidence": 0.98},
+    {"id": "e9", "type": "KNOWS_NETWORK", "source": "agent:observed", "target": "network:8.8.8.0/24", "confidence": 0.35},
+    {"id": "e10", "type": "KNOWS_SERVICE", "source": "agent:observed", "target": "service:ssh-10.0.0.9", "confidence": 0.95},
+    {"id": "e11", "type": "KNOWS_SERVICE", "source": "agent:observed", "target": "service:https-10.0.0.9", "confidence": 0.9},
+    {"id": "e12", "type": "KNOWS_SERVICE", "source": "agent:observed", "target": "service:pgsql-db", "confidence": 0.9},
+    {"id": "e13", "type": "KNOWS_DATA", "source": "agent:observed", "target": "data:secrets", "confidence": 0.95},
+    {"id": "e14", "type": "KNOWS_DATA", "source": "agent:observed", "target": "data:unstable", "confidence": 0.92},
+    {"id": "e15", "type": "KNOWS_DATA", "source": "agent:observed", "target": "data:noise", "confidence": 0.92},
+    {"id": "e16", "type": "KNOWS_BLOCK", "source": "agent:observed", "target": "block:dns-drop", "confidence": 0.78},
+    {"id": "e17", "type": "MEMBER_OF", "source": "host:local", "target": "network:10.0.0.0/24", "confidence": 1.0},
+    {"id": "e18", "type": "MEMBER_OF", "source": "host:ip:10.0.0.1", "target": "network:10.0.0.0/24", "confidence": 0.98},
+    {"id": "e19", "type": "MEMBER_OF", "source": "host:ip:10.0.0.9", "target": "network:10.0.0.0/24", "confidence": 0.95},
+    {"id": "e20", "type": "HOSTS_SERVICE", "source": "host:ip:10.0.0.9", "target": "service:ssh-10.0.0.9", "confidence": 0.95},
+    {"id": "e21", "type": "HOSTS_SERVICE", "source": "host:ip:10.0.0.9", "target": "service:https-10.0.0.9", "confidence": 0.9},
+    {"id": "e22", "type": "STORES_DATA", "source": "host:local", "target": "data:secrets", "confidence": 0.95},
+    {"id": "e23", "type": "STORES_DATA", "source": "host:local", "target": "data:unstable", "confidence": 0.92},
+    {"id": "e24", "type": "MAY_BLOCK", "source": "block:dns-drop", "target": "service:ssh-10.0.0.9", "confidence": 0.78}
+  ]
+}
