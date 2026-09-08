@@ -340,6 +340,66 @@ class CandidateGateTests(unittest.TestCase):
         self.assertIn("blind exfiltration of undiscovered data", categories)
 
 
+class TranslatorRoundTripTests(unittest.TestCase):
+    """The forward and inverse command mappings must agree where they overlap.
+
+    `nsg-action-translator` owns the forward direction (NSG action -> CommandPlan
+    -> argv); this repo owns the inverse (argv + effect -> NSG action). If the
+    inverse cannot recover the action type from the exact argv the translator
+    emits, then a trajectory recorded while an NSG agent was driving the range
+    would be unlabelable — the two halves of the loop would disagree.
+
+    argv shapes are copied from
+    `nsg_action_translator/actions/translator.py:67-83` rather than imported, to
+    keep the test independent of that repo's layout. Update them if it changes.
+    """
+
+    def recovered_type(self, argv):
+        facts = parse_command({"command": {"argv": list(argv), "executable": argv[0]}})
+        return facts.action_types
+
+    def test_scan_network_plan_is_recovered(self):
+        argv = (
+            "nmap", "-sn", "--max-retries", "1", "--host-timeout", "10s",
+            "-oX", "-", "--", "10.0.0.0/24",
+        )
+        self.assertEqual(self.recovered_type(argv), frozenset({ActionType.ScanNetwork}))
+
+    def test_find_services_plan_is_recovered(self):
+        argv = (
+            "nmap", "-sV", "--version-light", "--max-retries", "1",
+            "--host-timeout", "60s", "-oX", "-", "--", "10.0.0.9",
+        )
+        self.assertEqual(self.recovered_type(argv), frozenset({ActionType.FindServices}))
+
+    def test_scan_plan_grounds_back_to_the_action_that_produced_it(self):
+        """Full round trip: the recovered label equals the original action."""
+        original = Action(
+            ActionType.ScanNetwork, {"source_host": LOCAL, "target_network": NET}
+        )
+        before = base_state()
+        after = base_state(known_hosts={LOCAL, TARGET})
+        commands = [
+            parse_command(
+                {
+                    "command": {
+                        "argv": ["nmap", "-sn", "-oX", "-", "--", "10.0.0.0/24"],
+                        "executable": "nmap",
+                    }
+                }
+            )
+        ]
+        result = label_transition(
+            before, after, diff_states(before, after), commands=commands,
+            provenance=provenance(),
+        )
+        self.assertEqual(len(result.labels), 1)
+        self.assertEqual(
+            candidates.action_key(result.labels[0].action), candidates.action_key(original)
+        )
+        self.assertEqual(result.labels[0].label_source, "effect+command")
+
+
 class MergeLabelTests(unittest.TestCase):
     def test_highest_confidence_wins_and_notes_merge(self):
         action = Action(ActionType.FindServices, {"source_host": LOCAL, "target_host": TARGET})

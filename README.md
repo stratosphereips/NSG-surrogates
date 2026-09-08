@@ -5,6 +5,13 @@ produced by **NSG-docker-state-creator** inside a real container and emits one
 **parameterized NetSecGame action**, which **nsg-action-translator** turns into a
 validated command plan and executes.
 
+There are two distinct paths through this repo, and they map commands and
+actions in **opposite directions**. Keeping them apart matters: only the first
+one runs live.
+
+**Runtime — state in, action out.** The surrogate decides; the translator turns
+that decision into a command:
+
 ```
 stratocyberlab container
         │
@@ -19,8 +26,34 @@ NSG-docker-state-creator ──► state/graph.json  (strategic level)
    └────────────────────────────────────────────────────────────────────┘
         │
         ▼  Action (NSG JSON)
-nsg-action-translator ──► CommandPlan ──► container
+nsg-action-translator ──► CommandPlan ──► container      [NSG action -> command]
 ```
+
+**Offline — observed behaviour in, labelled pairs out.** No policy involved; this
+is what the trajectories are for:
+
+```
+trajectory/sequence.jsonl + trajectory/states/*/graph.json
+        │
+        ▼
+   ┌──────────────────── NSG-surrogates (this repo) ────────────────────┐
+   │ dataset         walk transitions, dedupe collector records         │
+   │ state_adapter   both state graphs  -> two GameStates               │
+   │ state_diff      before vs after    -> NSG-level change             │
+   │ labeling        change + argv      -> NSG Action + evidence        │
+   └────────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+pairs.jsonl + unmappable.jsonl                    [command + effect -> NSG action]
+```
+
+The two mappings should agree where they overlap, and for the translator's two
+implemented capabilities they do: it builds `nmap -sn` for `ScanNetwork` and
+`nmap -sV` for `FindServices`, and `labeling.parse_command` recovers exactly
+those action types from those flags (asserted in
+`tests/test_labeling.py::TranslatorRoundTripTests`). The translator's plan
+registry is the authoritative forward mapping, so `labeling.COMMAND_RULES`
+should follow it as more capabilities are implemented there.
 
 This is a proof of concept whose purpose is to find the problems in that
 mapping. What it found is written up in
@@ -92,7 +125,7 @@ unreachable. See findings 2 and 3.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests        # 77 tests
+python -m unittest discover -s tests        # 80 tests
 ```
 
 They are `unittest.TestCase` on purpose: the mapping tests run with the standard
