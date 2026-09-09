@@ -1,15 +1,8 @@
-"""Tests for action validity and for checkpoint compatibility.
-
-The compatibility test matters for the comparison this repository is built to
-support: if the parameters of this policy diverge from
-`sgrl_netsec`'s `FactoredGNNPolicy`, a checkpoint from the simulator agent
-cannot be evaluated on projected container states without retraining.
-"""
+"""Tests for action validity and checkpoint round-tripping."""
 
 import importlib.util
 import json
 import os
-import sys
 import unittest
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None and (
@@ -21,11 +14,10 @@ if HAS_TORCH:
 
     from nsg_surrogate.candidates import enumerate_actions
     from nsg_surrogate.encoder import state_summary, state_to_pyg
-    from nsg_surrogate.policy import FactoredGNNPolicy, SurrogatePolicy
+    from nsg_surrogate.policy import SurrogatePolicy
     from nsg_surrogate.state_adapter import AdapterConfig, project_graph_to_game_state
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "strategic_graph.json")
-SGRL_REPO = "/home/rigakmar/repos/sgrl_netsec"
 EXTERNAL = "203.0.113.9"
 
 
@@ -108,71 +100,6 @@ class DecisionTests(unittest.TestCase):
 
         for key, value in self.surrogate.policy.state_dict().items():
             self.assertTrue(torch.equal(value, reloaded.policy.state_dict()[key]), key)
-
-
-@unittest.skipUnless(HAS_TORCH, "torch and torch-geometric required")
-@unittest.skipUnless(
-    os.path.isdir(SGRL_REPO), f"simulator agent not available at {SGRL_REPO}"
-)
-class SimulatorCheckpointCompatibilityTests(unittest.TestCase):
-    """The surrogate must accept weights trained by the simulator agent."""
-
-    def _simulator_policy(self):
-        if SGRL_REPO not in sys.path:
-            sys.path.insert(0, SGRL_REPO)
-        from blackbox_pure_gnn_agent import FactoredGNNPolicy as SimulatorPolicy
-
-        return SimulatorPolicy()
-
-    def test_state_dict_keys_and_shapes_match(self):
-        try:
-            simulator = self._simulator_policy()
-        except ImportError as error:  # pragma: no cover - environment dependent
-            self.skipTest(f"cannot import the simulator agent: {error}")
-
-        surrogate = FactoredGNNPolicy()
-        projection = projected_state()
-        actions = enumerate_actions(projection.state)
-        graph, object_to_idx, _ = state_to_pyg(
-            projection.state, provenance=projection.provenance
-        )
-        summary = state_summary(projection.state, provenance=projection.provenance)
-
-        # GATv2Conv is lazily initialised: parameters only exist after a forward.
-        surrogate.decide(graph, object_to_idx, actions, summary=summary)
-        simulator(graph, object_to_idx, actions, state_summary=summary)
-
-        surrogate_shapes = {
-            key: tuple(value.shape) for key, value in surrogate.state_dict().items()
-        }
-        simulator_shapes = {
-            key: tuple(value.shape) for key, value in simulator.state_dict().items()
-        }
-        self.assertEqual(
-            sorted(surrogate_shapes), sorted(simulator_shapes), "parameter names diverged"
-        )
-        self.assertEqual(surrogate_shapes, simulator_shapes, "parameter shapes diverged")
-
-    def test_simulator_weights_load_into_the_surrogate(self):
-        try:
-            simulator = self._simulator_policy()
-        except ImportError as error:  # pragma: no cover - environment dependent
-            self.skipTest(f"cannot import the simulator agent: {error}")
-
-        projection = projected_state()
-        actions = enumerate_actions(projection.state)
-        graph, object_to_idx, _ = state_to_pyg(
-            projection.state, provenance=projection.provenance
-        )
-        summary = state_summary(projection.state, provenance=projection.provenance)
-        simulator(graph, object_to_idx, actions, state_summary=summary)
-
-        surrogate = FactoredGNNPolicy()
-        surrogate.decide(graph, object_to_idx, actions, summary=summary)
-        surrogate.load_state_dict(simulator.state_dict())
-
-        for key, value in simulator.state_dict().items():
-            self.assertTrue(torch.equal(value, surrogate.state_dict()[key]), key)
 
 
 if __name__ == "__main__":

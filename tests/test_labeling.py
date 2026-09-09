@@ -287,6 +287,18 @@ class CommandParsingTests(unittest.TestCase):
         self.assertIn(ActionType.ExfiltrateData, upload.action_types)
         self.assertIn("/root/secret", upload.paths)
 
+    def test_surrounding_flags_do_not_disturb_extraction(self):
+        """Real invocations carry output and timeout flags between the arguments."""
+        argv = [
+            "nmap", "-sn", "--max-retries", "1", "--host-timeout", "10s",
+            "-oX", "-", "--", "10.0.0.0/24",
+        ]
+        facts = parse_command({"command": {"argv": argv, "executable": "nmap"}})
+        self.assertEqual(facts.action_types, frozenset({ActionType.ScanNetwork}))
+        self.assertEqual(facts.cidrs, ("10.0.0.0/24",))
+        self.assertEqual(facts.ports, ())
+        self.assertEqual(facts.paths, ())
+
     def test_ssh_port_flag(self):
         facts = parse_command({"command": {"argv": ["ssh", "-p", "2222", "root@10.0.0.9"], "executable": "ssh"}})
         self.assertEqual(facts.ports, (2222,))
@@ -380,67 +392,6 @@ class CandidateGateTests(unittest.TestCase):
         )
         categories = {item.category for item in result.unmappable}
         self.assertIn("blind exfiltration of undiscovered data", categories)
-
-
-class TranslatorRoundTripTests(unittest.TestCase):
-    """The two command mappings must agree where they overlap.
-
-    `nsg-action-translator` implements the forward direction, from a NetSecGame
-    action to a command; this repository implements the inverse. If the inverse
-    cannot recover the action type from the exact arguments the translator
-    produces, a trajectory recorded while a NetSecGame agent drove the range
-    could not be labelled.
-
-    The argument lists are copied from
-    `nsg_action_translator/actions/translator.py:67-83` rather than imported, so
-    that the test does not depend on that repository's layout. They need
-    updating if it changes.
-    """
-
-    def recovered_type(self, argv):
-        facts = parse_command({"command": {"argv": list(argv), "executable": argv[0]}})
-        return facts.action_types
-
-    def test_scan_network_plan_is_recovered(self):
-        argv = (
-            "nmap", "-sn", "--max-retries", "1", "--host-timeout", "10s",
-            "-oX", "-", "--", "10.0.0.0/24",
-        )
-        self.assertEqual(self.recovered_type(argv), frozenset({ActionType.ScanNetwork}))
-
-    def test_find_services_plan_is_recovered(self):
-        argv = (
-            "nmap", "-sV", "--version-light", "--max-retries", "1",
-            "--host-timeout", "60s", "-oX", "-", "--", "10.0.0.9",
-        )
-        self.assertEqual(self.recovered_type(argv), frozenset({ActionType.FindServices}))
-
-    def test_scan_plan_grounds_back_to_the_action_that_produced_it(self):
-        """Full round trip: the recovered label equals the original action."""
-        original = Action(
-            ActionType.ScanNetwork, {"source_host": LOCAL, "target_network": NET}
-        )
-        before = base_state()
-        after = base_state(known_hosts={LOCAL, TARGET})
-        commands = [
-            parse_command(
-                {
-                    "command": {
-                        "argv": ["nmap", "-sn", "-oX", "-", "--", "10.0.0.0/24"],
-                        "executable": "nmap",
-                    }
-                }
-            )
-        ]
-        result = label_transition(
-            before, after, diff_states(before, after), commands=commands,
-            provenance=provenance(),
-        )
-        self.assertEqual(len(result.labels), 1)
-        self.assertEqual(
-            candidates.action_key(result.labels[0].action), candidates.action_key(original)
-        )
-        self.assertEqual(result.labels[0].label_source, "effect+command")
 
 
 class MergeLabelTests(unittest.TestCase):

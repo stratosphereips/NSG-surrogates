@@ -1,10 +1,11 @@
 """`GameState` to PyTorch Geometric `HeteroData`.
 
-Feature layout, node types, edge types and node ordering match
-`sgrl_netsec/policy_netsec.py:state_to_pyg` exactly, so a checkpoint trained in
-the simulator loads here and its inputs mean the same thing. Two features are
-computed from different sources, because the simulator's definitions carry no
-information in a container network:
+The feature layout, node types, edge types and node ordering follow
+`sgrl_netsec/policy_netsec.py:state_to_pyg`. Matching it is not a requirement:
+11 of the 16 feature positions are unused and are available for information the
+projection currently discards, such as node confidence (finding 7). Two features
+are already computed from different sources, because the simulator's
+definitions carry no information in a container network:
 
 `host[1]`, whether the host is external
     The simulator evaluates `netaddr.IPAddress(...).is_private()`. A container
@@ -21,9 +22,8 @@ information in a container network:
     state creator reports the real port, supplied here through
     `Provenance.service_ports`.
 
-Enabling the port feature therefore changes the input distribution relative to a
-simulator-trained checkpoint. Pass `legacy_service_port=True` to reproduce the
-simulator's behaviour when comparing the two.
+Pass `legacy_service_port=True` to reproduce the simulator's behaviour when
+comparing the two directly.
 """
 
 from __future__ import annotations

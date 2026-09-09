@@ -188,9 +188,10 @@ ranges; they are discarded by default, which also means the agent cannot scan
 anything it has not already been told about.
 
 No uncertainty is currently passed to the policy. The node feature vectors have
-11 unused positions (indices 5 to 15), so a confidence channel is available. Using
-it would make checkpoints incompatible with the simulator agent's feature
-layout, which is why it is currently empty.
+11 unused positions (indices 5 to 15), so a confidence channel is available.
+Compatibility with the simulator agent's feature layout is not maintained, so
+using them is a free choice; the positions are empty because no measurement yet
+shows what to put there.
 
 ## 8. Firewall blocks cannot be projected
 
@@ -395,8 +396,9 @@ nodes are deduplicated across hosts; `state_to_pyg` creates one node per
 - `ExploitService` is reduced to the lexicographically smallest valid service
   per (source, target) pair, because in the simulator the choice of service does
   not affect the outcome. In a real range the service determines whether an
-  exploit exists. This reduction is retained for compatibility with simulator
-  checkpoints and documented in `candidates.canonicalize_exploits`.
+  exploit exists. The reduction is retained because the recorded labels cannot
+  yet identify which service was used, and is documented in
+  `candidates.canonicalize_exploits`.
 
 ## 17. Observed behaviour with no NetSecGame representation
 
@@ -502,11 +504,6 @@ finding 7 notes that 11 feature positions are unused.
 
 # Verified
 
-- **Checkpoint compatibility with the simulator agent.**
-  `tests/test_policy.py` constructs this repository's `FactoredGNNPolicy` and
-  `sgrl_netsec`'s side by side, runs a forward pass on both (GATv2 layers
-  initialise lazily, so parameters exist only afterwards), and asserts identical
-  parameter names and shapes and a successful `load_state_dict`.
 - **The projection and labelling path runs on real observation data.**
   `inspect`, `state`, `dataset` and `act` all operate on both runs.
 - **The agent runs against a live NetSecGame server.** Twenty episodes with the
@@ -515,8 +512,9 @@ finding 7 notes that 11 feature positions are unused.
   `ExploitService` zero times where the untrained policy selects it 78 times.
   Neither wins, because the training set contains no exploitation or
   exfiltration (README, *Measured behaviour of the current checkpoint*).
-- **Determinism and coverage.** 111 tests; the projection and labelling tests
-  require only the standard library.
+- **Determinism and coverage.** 108 tests; the projection and labelling tests
+  require only the standard library, and no test requires another repository to
+  be checked out.
 - **Pairing requires no heuristics.** The trajectory layer's `state_before` and
   `state_after` references, together with the per-state graphs, supply the
   pairing directly. Only the labels had to be derived.

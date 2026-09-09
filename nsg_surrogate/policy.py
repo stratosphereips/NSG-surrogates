@@ -1,11 +1,12 @@
 """The policy: graph tensors in, one parameterised NetSecGame action out.
 
-`FactoredGNNPolicy` has the same submodule names, parameter shapes and head
-inputs as `sgrl_netsec/blackbox_pure_gnn_agent.py:FactoredGNNPolicy`, so a
-checkpoint from that agent loads here unmodified. This is intentional: comparing
-a policy fitted to emulation data with one trained in the simulator requires
-that parameters transfer between them without conversion.
-`tests/test_policy.py` asserts the equivalence.
+The architecture is taken from `sgrl_netsec/blackbox_pure_gnn_agent.py`: a
+network body shared by four heads that select an action type, a source host, a
+primary target and, for exfiltration, a destination. That is provenance rather
+than a constraint. Parameter compatibility with that agent is not a
+requirement, so the two may diverge; anything gained by changing the feature
+layout or the head structure is worth more than the ability to exchange
+checkpoints.
 
 `SurrogatePolicy` adds what is needed outside the simulator: per-episode attempt
 counters, the projection's `Provenance`, and a `Decision` record of what each

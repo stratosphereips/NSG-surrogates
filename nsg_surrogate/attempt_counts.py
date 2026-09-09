@@ -1,9 +1,8 @@
 """Counts of attempted actions within one episode, per target.
 
-Behaviour matches `sgrl_netsec/attempt_counts.py`, so the node features a
-simulator-trained checkpoint expects are reproduced exactly. The counts describe
-the agent's own interaction history rather than the environment, so they are held
-by the agent and passed to the encoder rather than derived from the state.
+The definition follows `sgrl_netsec/attempt_counts.py`. The counts describe the
+agent's own interaction history rather than the environment, so they are held by
+the agent and passed to the encoder rather than derived from the state.
 
 They matter more in the emulated range than in the simulator. The state graph is
 rebuilt on a timer rather than after each action, so an action is not guaranteed

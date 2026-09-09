@@ -61,18 +61,24 @@ Fitted policy to simulator agent:
 models/surrogate.pth ──► nsg_agent (BaseAgent) ◄──socket──► NetSecGame server
 ```
 
-The second path mirrors `sgrl_netsec/blackbox_pure_gnn_agent.py`, so results are
-comparable with the simulator-native agents.
+The policy architecture and this second path follow
+`sgrl_netsec/blackbox_pure_gnn_agent.py`, so results are reported in the same
+form as the simulator's own agents. That is provenance, not a constraint: the
+two are free to diverge, and parameter compatibility between them is not
+maintained.
 
 ### The mapping this repository implements
 
 `labeling` maps an observed command together with its observed effect to a
 NetSecGame action. `nsg-action-translator` implements the opposite mapping, from
-a NetSecGame action to an executable command. The two agree where they overlap:
-the translator builds `nmap -sn` for `ScanNetwork` and `nmap -sV` for
-`FindServices`, and `labeling.parse_command` recovers those action types from
-those arguments. `tests/test_labeling.py::TranslatorRoundTripTests` checks this,
-and is the only place where the two components are compared.
+a NetSecGame action to an executable command, and is not a dependency here.
+
+The two would need to agree only if a NetSecGame agent drove the emulated range
+through the translator and this repository then labelled the resulting
+recording. That is not the case today, and per finding 9 it cannot be for three
+of the five action types. Consistency between them is therefore not asserted
+here: doing so would require reading the translator's command plans, and copies
+of them cannot detect a change on that side.
 
 ## Requirements
 
@@ -80,13 +86,40 @@ and is the only place where the two components are compared.
 conda activate nsg
 ```
 
-That environment has torch 2.14, torch-geometric 2.8, netaddr, numpy, and
-`netsecgame` 0.2.0 installed from `/opt/Agents/NetSecGame`. Nothing further is
-needed.
+That environment provides everything: `netsecgame`, torch 2.14,
+torch-geometric 2.8, netaddr and numpy.
+
+`netsecgame` is an ordinary package dependency, published on PyPI:
+
+```bash
+pip install netsecgame                              # released version
+pip install -e /path/to/NetSecGame                  # to track development
+```
+
+It is currently installed as an editable checkout (version 0.2.0), because the
+package is under active development and this repository needs the current
+version. Nothing here records where that checkout is; the package is imported by
+name.
 
 The projection and labelling modules (`state_adapter`, `candidates`,
 `state_diff`, `labeling`, `dataset`) do not import torch and run under any
 Python 3.12 or later with `netsecgame` importable.
+
+### External dependencies
+
+| Dependency | Kind | Extent |
+|---|---|---|
+| `netsecgame` | package import | `GameState`, `IP`, `Network`, `Service`, `Data`, `Action`, `ActionType`, `generate_valid_actions`, `BaseAgent`, `AgentRole` — nothing else |
+| NSG-docker-state-creator | data format | the state graph and trajectory layout its output uses; no code is imported and no path is recorded |
+| torch, torch-geometric, netaddr | package imports | the encoder, the policy and address arithmetic |
+
+Knowledge of the state-creator format is confined to three modules:
+`state_adapter` reads the state graph, `dataset` reads the trajectory layout,
+and `labeling` reads the command fields of an action record. The format is
+identified by `schema_version` (`nsg-state-graph/1.1`), which the projection
+checks and reports, and `tests/test_dataset.py` constructs a synthetic
+trajectory in that layout, so the assumptions are exercised without the other
+repository being present.
 
 ## Running the pipeline
 
@@ -285,14 +318,12 @@ command with `--out`.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests        # 111 tests
+python -m unittest discover -s tests        # 108 tests
 ```
 
 They are written as `unittest.TestCase`: the projection and labelling tests need
 only the standard library, so they run without torch, and pytest collects them
-unchanged. `tests/test_policy.py` verifies that this repository's policy has the
-same parameter names and shapes as `sgrl_netsec`'s `FactoredGNNPolicy`, so a
-checkpoint from the simulator agent loads here unmodified.
+unchanged. No test depends on another repository being checked out.
 
 ## Dataset format
 

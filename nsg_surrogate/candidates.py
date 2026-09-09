@@ -2,8 +2,8 @@
 
 Every head of the policy is masked against this set, so the module defines what
 the surrogate may select. The set is produced by `netsecgame`'s own
-`generate_valid_actions`, which keeps the action space identical to the one the
-simulator's agents are trained against.
+`generate_valid_actions`, so the action space is the one NetSecGame defines
+rather than a reimplementation of it.
 
 One filter is applied on top. The upstream generator currently offers
 `ExfiltrateData` from hosts the agent does not control, and the game does not
@@ -93,8 +93,9 @@ def canonicalize_exploits(actions: Iterable[Action]) -> List[Action]:
 
     The assumption is specific to the simulator and does not hold in a real
     range, where the service determines whether an exploit exists. It is
-    retained so that a policy trained in the simulator runs unchanged, and is
-    documented here rather than left implicit.
+    retained because the recorded data cannot yet distinguish the cases
+    (finding 11), not because of any compatibility requirement, and can be
+    removed once labels identify the exploited service.
     """
     reduced: List[Action] = []
     exploit_index: Dict[Tuple[object, object], int] = {}
