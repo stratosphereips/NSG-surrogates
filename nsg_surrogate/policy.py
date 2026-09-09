@@ -57,7 +57,6 @@ class Decision:
         return {
             "action": self.action.as_dict,
             "action_human": candidates_mod.describe(self.action),
-            "translator_support": candidates_mod.support_status(self.action),
             "head_choices": self.head_choices,
             "log_prob": self.log_prob,
             "entropy": self.entropy,

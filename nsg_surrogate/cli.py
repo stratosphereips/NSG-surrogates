@@ -16,8 +16,6 @@ import os
 import sys
 from typing import Dict, List, Optional, Sequence
 
-from netsecgame.game_components import ActionType
-
 from . import candidates as candidates_mod
 from .state_adapter import AdapterConfig, Projection, project_path
 
@@ -87,7 +85,6 @@ def _report_dict(projection: Projection, actions: List) -> Dict[str, object]:
         "notes": report.notes,
         "action_space": candidates_mod.breakdown(actions),
         "action_space_total": len(actions),
-        "action_space_executable": len(candidates_mod.executable(actions)),
     }
 
 
@@ -121,11 +118,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
     print(f"action space ({len(actions)} candidates)")
     for action_type, count in candidates_mod.breakdown(actions).items():
-        status = candidates_mod.TRANSLATOR_SUPPORT.get(ActionType[action_type], "unknown")
-        print(f"  {action_type:<16} {count:>5}   translator: {status}")
-    executable = candidates_mod.executable(actions)
-    share = (100.0 * len(executable) / len(actions)) if actions else 0.0
-    print(f"  {'executable now':<16} {len(executable):>5}   ({share:.0f}% of candidates)")
+        print(f"  {action_type:<16} {count:>5}")
 
     if report.notes:
         print()
@@ -168,7 +161,6 @@ def cmd_act(args: argparse.Namespace) -> int:
         print(json.dumps(decision.as_dict(), indent=2, sort_keys=True))
     else:
         print(candidates_mod.describe(decision.action))
-        print(f"  translator support: {candidates_mod.support_status(decision.action)}")
         print(f"  candidates: {len(actions)}")
         for head, choice in decision.head_choices.items():
             print(f"  {head}: {choice}")
@@ -216,8 +208,7 @@ def cmd_dataset(args: argparse.Namespace) -> int:
     print()
     print("labels by action type")
     for action_type, count in report.labels_by_type.items():
-        print(f"  {action_type:<22} {count:>7}   translator: "
-              f"{candidates_mod.TRANSLATOR_SUPPORT.get(ActionType[action_type], '?')}")
+        print(f"  {action_type:<22} {count:>7}")
     print()
     print(
         f"transitions with no label   {report.transitions_with_no_label} of {report.transitions}"

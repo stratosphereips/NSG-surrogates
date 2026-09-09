@@ -27,7 +27,7 @@ import os
 import shutil
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-from .candidates import breakdown, enumerate_actions, support_status
+from .candidates import breakdown, enumerate_actions
 from .labeling import CommandFacts, Label, LabelResult, Unmappable, label_transition, parse_command
 from .state_adapter import AdapterConfig, Projection, project_graph_to_game_state
 from .state_diff import diff_states, lost_knowledge
@@ -69,7 +69,6 @@ class DatasetReport:
     labels: int = 0
     labels_by_source: Dict[str, int] = field(default_factory=dict)
     labels_by_type: Dict[str, int] = field(default_factory=dict)
-    labels_by_translator_support: Dict[str, int] = field(default_factory=dict)
     rejected: Dict[str, int] = field(default_factory=dict)
     unmappable: Dict[str, int] = field(default_factory=dict)
     transitions_with_no_label: int = 0
@@ -88,7 +87,6 @@ class DatasetReport:
             "labels": self.labels,
             "labels_by_source": self.labels_by_source,
             "labels_by_type": self.labels_by_type,
-            "labels_by_translator_support": self.labels_by_translator_support,
             "rejected": self.rejected,
             "unmappable": self.unmappable,
             "transitions_with_no_label": self.transitions_with_no_label,
@@ -241,7 +239,6 @@ def build(
 
     label_sources: Counter = Counter()
     label_types: Counter = Counter()
-    support: Counter = Counter()
     rejected: Counter = Counter()
     unmappable: Counter = Counter()
     lost_totals: Counter = Counter()
@@ -330,7 +327,6 @@ def build(
             result.rows.append(row)
             label_sources[label.label_source] += 1
             label_types[label.action.type.name] += 1
-            support[support_status(label.action)] += 1
 
         for label, reason in labelling.rejected:
             rejected[f"{label.action.type.name}: {reason}"] += 1
@@ -349,7 +345,6 @@ def build(
     report.labels = len(result.rows)
     report.labels_by_source = dict(label_sources)
     report.labels_by_type = dict(sorted(label_types.items()))
-    report.labels_by_translator_support = dict(support)
     report.rejected = dict(rejected.most_common(20))
     report.unmappable = dict(unmappable.most_common())
     report.knowledge_lost = dict(lost_totals)

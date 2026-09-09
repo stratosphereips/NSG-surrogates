@@ -8,9 +8,9 @@ against — that identity is the premise of porting a policy out to the real
 range.
 
 One documented correction is applied on top: the upstream generator emits
-`ExfiltrateData` from hosts the agent does not control, which the game will not
-execute (see `enumerate_actions`). Knowing where data is does not mean being
-able to take it.
+`ExfiltrateData` from hosts the agent does not control, which the game itself
+will not execute (see `enumerate_actions`). Knowing where data is does not mean
+being able to take it.
 
 Not representable at all, and therefore not in the candidate set: exfiltrating
 data from a *controlled* host without having discovered it first — the blind
@@ -26,24 +26,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from netsecgame.game_components import Action, ActionType, GameState
 from netsecgame.utils.utils import generate_valid_actions
-
-#: What `nsg-action-translator` can currently do with an emitted action.
-#: Source: its README action-capability table. An action the surrogate emits
-#: outside the `live` set is a well-formed NSG action that the real environment
-#: will not carry out, so the PoC has to measure how often that happens.
-TRANSLATOR_SUPPORT: Dict[ActionType, str] = {
-    ActionType.ScanNetwork: "live",
-    ActionType.FindServices: "live",
-    ActionType.FindData: "unsupported",
-    ActionType.ExploitService: "blocked",
-    ActionType.ExfiltrateData: "blocked",
-    ActionType.BlockIP: "unsupported",
-}
-
-EXECUTABLE_ACTION_TYPES = frozenset(
-    action_type for action_type, status in TRANSLATOR_SUPPORT.items() if status == "live"
-)
-
 
 def action_key(action: Action) -> Tuple[ActionType, Tuple[Tuple[str, Any], ...]]:
     """Order-independent identity for an action.
@@ -146,16 +128,6 @@ def breakdown(actions: Iterable[Action]) -> Dict[str, int]:
         key = action.type.name
         counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items()))
-
-
-def executable(actions: Iterable[Action]) -> List[Action]:
-    """Keep only actions the translator can currently execute for real."""
-    return [action for action in actions if action.type in EXECUTABLE_ACTION_TYPES]
-
-
-def support_status(action: Action) -> str:
-    """`live`, `unsupported`, `blocked`, or `unknown` for one action."""
-    return TRANSLATOR_SUPPORT.get(action.type, "unknown")
 
 
 def describe(action: Action) -> str:

@@ -1,66 +1,59 @@
 # NSG-surrogates
 
-A surrogate agent for the dockerized NetSecGame loop: it reads the state graph
-produced by **NSG-docker-state-creator** inside a real container and emits one
-**parameterized NetSecGame action**, which **nsg-action-translator** turns into a
-validated command plan and executes.
+Builds surrogate agents from **emulation trajectories**. It turns behaviour
+observed inside a real container into NetSecGame-space `(state, action)` pairs,
+clones a policy from them, and runs that policy as an ordinary NetSecGame agent —
+so behaviour recorded in the emulated range can be replayed, measured, and
+trained against in simulation.
 
-There are two distinct paths through this repo, and they map commands and
-actions in **opposite directions**. Keeping them apart matters: only the first
-one runs live.
+Scope stops there. Executing NSG actions back in the emulated range is
+`nsg-action-translator`'s job, not this repo's.
 
-**Runtime — state in, action out.** The surrogate decides; the translator turns
-that decision into a command:
+This is a proof of concept whose purpose is to find the problems in that
+mapping. What it found is in [`docs/poc-findings.md`](docs/poc-findings.md) —
+read that before trusting any output.
+
+Emulation traces in, cloned policy out:
 
 ```
 stratocyberlab container
         │
-NSG-docker-state-creator ──► state/graph.json  (strategic level)
-        │
-        ▼
-   ┌──────────────────── NSG-surrogates (this repo) ────────────────────┐
-   │ state_adapter   graph.json      -> netsecgame GameState + report   │
-   │ candidates      GameState       -> valid parameterized actions     │
-   │ encoder         GameState       -> PyG HeteroData (4 node types)   │
-   │ policy          graph + mask    -> one Action, four factored heads │
-   └────────────────────────────────────────────────────────────────────┘
-        │
-        ▼  Action (NSG JSON)
-nsg-action-translator ──► CommandPlan ──► container      [NSG action -> command]
-```
-
-**Offline — observed behaviour in, labelled pairs out.** No policy involved; this
-is what the trajectories are for:
-
-```
-trajectory/sequence.jsonl + trajectory/states/*/graph.json
+NSG-docker-state-creator ──► trajectory/sequence.jsonl + states/*/graph.json
         │
         ▼
    ┌──────────────────── NSG-surrogates (this repo) ────────────────────┐
    │ dataset         walk transitions, dedupe collector records         │
-   │ state_adapter   both state graphs  -> two GameStates               │
+   │ state_adapter   state graph        -> netsecgame GameState         │
    │ state_diff      before vs after    -> NSG-level change             │
    │ labeling        change + argv      -> NSG Action + evidence        │
+   │                                                                    │
+   │ encoder         GameState          -> PyG HeteroData               │
+   │ training        pairs              -> cloned four-head policy      │
    └────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-pairs.jsonl + unmappable.jsonl                    [command + effect -> NSG action]
+        │                                            │
+        ▼                                            ▼
+   pairs.jsonl + unmappable.jsonl              models/surrogate.pth
 ```
 
-The two mappings should agree where they overlap, and for the translator's two
-implemented capabilities they do: it builds `nmap -sn` for `ScanNetwork` and
-`nmap -sV` for `FindServices`, and `labeling.parse_command` recovers exactly
-those action types from those flags (asserted in
-`tests/test_labeling.py::TranslatorRoundTripTests`). The translator's plan
-registry is the authoritative forward mapping, so `labeling.COMMAND_RULES`
-should follow it as more capabilities are implemented there.
+and that policy plays in the simulator over the coordinator's socket, the way
+`sgrl_netsec/blackbox_pure_gnn_agent.py` does:
 
-This is a proof of concept whose purpose is to find the problems in that
-mapping. What it found is written up in
-[`docs/poc-findings.md`](docs/poc-findings.md) — read that before trusting any
-output. The longer-term goal (learning the docker environment into NetSecGame,
-training agents in simulation, full knowledge-graph loop) is deliberately out of
-scope here.
+```
+models/surrogate.pth ──► nsg_agent (BaseAgent) ◄──socket──► NetSecGame server
+```
+
+Verified: 20 episodes against a live server, with a random-init control (see
+[Play the surrogate in NetSecGame](#play-the-surrogate-in-netsecgame)).
+
+### The mapping this repo owns
+
+`labeling` maps **command + observed effect -> NSG action**. That is the inverse
+of what `nsg-action-translator` does (NSG action -> command), and the two agree
+where they overlap: the translator builds `nmap -sn` for `ScanNetwork` and
+`nmap -sV` for `FindServices`, and `labeling.parse_command` recovers exactly
+those action types from those flags — asserted in
+`tests/test_labeling.py::TranslatorRoundTripTests`. That test is the guard
+against the two drifting apart; nothing else here depends on the translator.
 
 ## Setup
 
@@ -268,7 +261,7 @@ apiece (27 MB for the two runs here). Override the locations with
 | Module | Needs torch | Responsibility |
 |---|---|---|
 | `state_adapter.py` | no | `graph.json` -> `GameState`, plus an `AdapterReport` of every dropped entity and forced choice, and a `Provenance` side channel (docker node ids, real service ports, external hosts) |
-| `candidates.py` | no | valid-action enumeration via `netsecgame`'s own `generate_valid_actions`, plus one documented correction (no exfiltration from uncontrolled hosts), exploit canonicalization, translator support status |
+| `candidates.py` | no | valid-action enumeration via `netsecgame`'s own `generate_valid_actions`, plus one documented correction (no exfiltration from uncontrolled hosts) and exploit canonicalization |
 | `state_diff.py` | no | NSG-level diff between two projected states; each category maps to exactly one action type |
 | `labeling.py` | no | effect-primary + command-corroborating labels, the candidate gate, and the inventory of what NSG cannot express |
 | `dataset.py` | no | trajectory walker, deduplication, and the self-contained dataset writer |
@@ -276,7 +269,6 @@ apiece (27 MB for the two runs here). Override the locations with
 | `attempt_counts.py` | no | per-episode attempt counters, encoded into node features |
 | `encoder.py` | yes | `GameState` -> `HeteroData`, feature-compatible with `sgrl_netsec` |
 | `policy.py` | yes | `FactoredGNNPolicy` (parameter-identical to the simulator agent) and `SurrogatePolicy` |
-| `translator_adapter.py` | yes | `PolicyAdapter`-shaped wrapper so `nsg-action-translator` can drive it |
 | `nsg_agent.py` | yes | `SurrogateController` (socket-free decisions) and `SurrogateAgent` (a `BaseAgent` that plays episodes against the game server) |
 
 ## Tests
@@ -407,9 +399,6 @@ Not yet done:
 - **21 training pairs, three of five action types.** The checkpoint is a
   pipeline-correctness artifact, not a usable policy. `ExploitService` and
   `ExfiltrateData` have no examples at all.
-- **Two of five action types are executable in the real range.** The translator
-  runs `ScanNetwork` and `FindServices` live; `FindData` is unsupported and
-  exploit/exfiltration are blocked, so the emulation leg of the loop cannot yet
-  close past discovery.
-- The translator's policy registry offers only `random`, so
-  `SurrogatePolicyAdapter` cannot yet be selected from its CLI.
+- **Only `strategic`-level runs are properly exercised.** `manual-run-strategic`
+  is the one frozen run at the intended level; everything else was measured on
+  an `operational` graph.

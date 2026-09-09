@@ -239,16 +239,6 @@ class CandidateTests(unittest.TestCase):
         again = candidates.enumerate_actions(self.projection.state)
         self.assertEqual([a.to_json() for a in self.actions], [a.to_json() for a in again])
 
-    def test_translator_support_split(self):
-        executable = candidates.executable(self.actions)
-        self.assertEqual(
-            {candidates.support_status(a) for a in executable}, {"live"}
-        )
-        self.assertEqual(
-            {a.type for a in self.actions if candidates.support_status(a) != "live"},
-            {ActionType.FindData, ActionType.ExploitService},
-        )
-
 
 class DataIdentityTests(unittest.TestCase):
     """NSG `Data` equality is (owner, id, type); the locator carries identity."""
