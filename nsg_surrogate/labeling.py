@@ -203,6 +203,7 @@ def label_transition(
     commands: Sequence[CommandFacts] = (),
     provenance: Optional[Provenance] = None,
     docker_evidence: Optional[Dict[str, Any]] = None,
+    states_differ: Optional[bool] = None,
 ) -> LabelResult:
     """Label one observed transition, and categorise what cannot be labelled."""
     result = LabelResult()
@@ -406,11 +407,19 @@ def label_transition(
     result.labels = merge_labels(result.labels)
 
     result.unmappable.extend(_blind_exfiltration(before, commands, source_host, evidence_base))
+    result.unmappable.extend(_unmappable_scan_ranges(before, commands, evidence_base))
 
     # ── commands that changed nothing ─────────────────────────────────────────
     if diff.empty:
         result.labels.extend(
-            _labels_from_commands_only(before, candidates, commands, source_host, evidence_base)
+            _labels_from_commands_only(
+                before,
+                candidates,
+                commands,
+                source_host,
+                evidence_base,
+                states_differ=bool(states_differ),
+            )
         )
         if not result.labels:
             for facts in commands:
@@ -434,17 +443,29 @@ def _labels_from_commands_only(
     commands: Sequence[CommandFacts],
     source_host: IP,
     evidence_base: Dict[str, Any],
+    states_differ: bool = False,
 ) -> List[Label]:
-    """Label actions that ran and yielded nothing.
+    """Label actions that ran and yielded nothing NSG can see.
 
     These matter: an NSG episode is full of actions that return no new
     knowledge, and a dataset built only from successful transitions would teach
     the surrogate that every action pays off.
+
+    `states_differ` separates two genuinely different situations. When the
+    observation never advanced, the action really did nothing. When the docker
+    states differ but their NSG projections are identical, the action *did*
+    something the mapping cannot see — `nmap -sS` against a host produces 1000
+    service nodes that the state creator attributes to the scanning host and the
+    adapter then filters, so a successful service scan leaves no NSG trace. The
+    note says which case a label came from, because the second is a mapping
+    problem rather than a property of the action.
     """
     labels: List[Label] = []
     for facts in commands:
         for action_type in sorted(facts.action_types, key=lambda t: t.name):
-            action = _ground_command(facts, action_type, before, source_host)
+            action, grounding_notes = _ground_command(
+                facts, action_type, before, source_host
+            )
             if action is None:
                 continue
             if _rejection_reason(action, candidates):
@@ -455,7 +476,15 @@ def _labels_from_commands_only(
                     label_source="command",
                     confidence=0.5,
                     evidence=dict(evidence_base, command=facts.shell_text),
-                    notes=("no NSG-visible state change followed this command",),
+                    notes=(
+                        (
+                            "docker state advanced but its NSG projection is unchanged: "
+                            "the effect of this command is invisible to the mapping"
+                            if states_differ
+                            else "no state change followed this command"
+                        ),
+                    )
+                    + grounding_notes,
                 )
             )
     return merge_labels(labels)
@@ -545,24 +574,34 @@ def _ground_command(
     action_type: ActionType,
     before: GameState,
     source_host: IP,
-) -> Optional[Action]:
-    """Build an action from a command's arguments, grounded in known state."""
+) -> Tuple[Optional[Action], Tuple[str, ...]]:
+    """Build an action from a command's arguments, grounded in known state.
+
+    Returns the action and any notes about granularity the mapping had to
+    flatten — an operator's command rarely lines up exactly with an NSG action.
+    """
     if action_type == ActionType.ScanNetwork:
         for cidr in facts.cidrs:
-            for network in before.known_networks:
-                if str(network) == cidr:
-                    return Action(
+            network, note = _network_for_scanned_range(cidr, before.known_networks)
+            if network is not None:
+                return (
+                    Action(
                         ActionType.ScanNetwork,
                         {"source_host": source_host, "target_network": network},
-                    )
+                    ),
+                    (note,) if note else (),
+                )
         for address in facts.ips:
             network = _containing_network(IP(address), before.known_networks)
             if network is not None:
-                return Action(
-                    ActionType.ScanNetwork,
-                    {"source_host": source_host, "target_network": network},
+                return (
+                    Action(
+                        ActionType.ScanNetwork,
+                        {"source_host": source_host, "target_network": network},
+                    ),
+                    (f"operator probed the single host {address}; NSG can only scan a network",),
                 )
-        return None
+        return None, ()
 
     if action_type in (ActionType.FindServices, ActionType.ExploitService):
         for address in facts.ips:
@@ -570,30 +609,42 @@ def _ground_command(
             if host not in before.known_hosts:
                 continue
             if action_type == ActionType.FindServices:
-                return Action(
-                    ActionType.FindServices, {"source_host": source_host, "target_host": host}
+                return (
+                    Action(
+                        ActionType.FindServices,
+                        {"source_host": source_host, "target_host": host},
+                    ),
+                    (),
                 )
             services = sorted(before.known_services.get(host, ()), key=str)
             if services:
-                return Action(
-                    ActionType.ExploitService,
-                    {
-                        "source_host": source_host,
-                        "target_host": host,
-                        "target_service": services[0],
-                    },
+                matched = _service_for_ports(host, services, facts, before)
+                return (
+                    Action(
+                        ActionType.ExploitService,
+                        {
+                            "source_host": source_host,
+                            "target_host": host,
+                            "target_service": matched or services[0],
+                        },
+                    ),
+                    () if matched else ("exploited service not identifiable from the command",),
                 )
-        return None
+        return None, ()
 
     if action_type == ActionType.FindData:
         # The command ran on the host the trajectory was collected in, so the
         # acting host is the target. Picking any controlled host instead would
         # attribute a local `cat` to the declared exfiltration drop box.
         if source_host in before.controlled_hosts:
-            return Action(
-                ActionType.FindData, {"source_host": source_host, "target_host": source_host}
+            return (
+                Action(
+                    ActionType.FindData,
+                    {"source_host": source_host, "target_host": source_host},
+                ),
+                (),
             )
-        return None
+        return None, ()
 
     if action_type == ActionType.ExfiltrateData:
         for address in facts.ips:
@@ -605,17 +656,20 @@ def _ground_command(
                     continue
                 for item in sorted(items, key=str):
                     if not facts.paths or any(item.id in path or path in item.id for path in facts.paths):
-                        return Action(
-                            ActionType.ExfiltrateData,
-                            {
-                                "source_host": origin,
-                                "target_host": destination,
-                                "data": item,
-                            },
+                        return (
+                            Action(
+                                ActionType.ExfiltrateData,
+                                {
+                                    "source_host": origin,
+                                    "target_host": destination,
+                                    "data": item,
+                                },
+                            ),
+                            (),
                         )
-        return None
+        return None, ()
 
-    return None
+    return None, ()
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -685,6 +739,87 @@ def _pick_exploited_service(
             return service, None
 
     return known_services[0], "exploited service not recoverable; canonical service used"
+
+
+def _network_for_scanned_range(
+    cidr: str, networks: Iterable[Network]
+) -> Tuple[Optional[Network], Optional[str]]:
+    """Map a scanned CIDR onto a known NSG network.
+
+    Operators do not scan the networks NSG knows about. In the strategic sample
+    run the container knows `172.23.0.0/16` and the operator ran
+    `nmap -sP -n 172.23.0.0/24` — a subrange. NSG's `ScanNetwork` is
+    parameterized by a known `Network` object, so the containing network is the
+    only expressible target, and the granularity difference is recorded rather
+    than hidden. A range no known network contains is not mapped at all.
+    """
+    try:
+        scanned = ipaddress.IPv4Network(cidr, strict=False)
+    except ValueError:
+        return None, None
+
+    parsed: List[Tuple[ipaddress.IPv4Network, Network]] = []
+    for network in networks:
+        try:
+            parsed.append((ipaddress.IPv4Network(str(network), strict=False), network))
+        except ValueError:
+            continue
+
+    for candidate, network in parsed:
+        if candidate == scanned:
+            return network, None
+
+    containing = [(c, n) for c, n in parsed if scanned.subnet_of(c)]
+    if containing:
+        # Narrowest containing network is the closest expressible target.
+        candidate, network = max(containing, key=lambda pair: pair[0].prefixlen)
+        return (
+            network,
+            f"operator scanned {scanned}, a subrange of known network {network}; "
+            "NSG can only scan a whole known network",
+        )
+    return None, None
+
+
+def _service_for_ports(
+    host: IP,
+    services: Sequence[Service],
+    facts: CommandFacts,
+    before: GameState,
+) -> Optional[Service]:
+    """Match a service by a port named on the command line, else by name."""
+    if facts.ports:
+        for service in services:
+            for token in (service.name, f"{service.type}/{service.name}"):
+                digits = "".join(character for character in str(token) if character.isdigit())
+                if digits and int(digits) in facts.ports:
+                    return service
+    for service in services:
+        if service.name.lower() == facts.executable.lower():
+            return service
+    return None
+
+
+def _unmappable_scan_ranges(
+    before: GameState, commands: Sequence[CommandFacts], evidence_base: Dict[str, Any]
+) -> List[Unmappable]:
+    """Scans of ranges no known network contains."""
+    unmappable: List[Unmappable] = []
+    for facts in commands:
+        if ActionType.ScanNetwork not in facts.action_types:
+            continue
+        for cidr in facts.cidrs:
+            network, _ = _network_for_scanned_range(cidr, before.known_networks)
+            if network is None:
+                unmappable.append(
+                    Unmappable(
+                        "scan of a range that is not a known network",
+                        f"{facts.executable} scanned {cidr}, which no known network contains; "
+                        "NSG's ScanNetwork is parameterized by a known network object",
+                        dict(evidence_base, cidr=cidr, command=facts.shell_text),
+                    )
+                )
+    return unmappable
 
 
 def _containing_network(host: IP, networks: Iterable[Network]) -> Optional[Network]:

@@ -125,7 +125,7 @@ unreachable. See findings 2 and 3.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests        # 80 tests
+python -m unittest discover -s tests        # 81 tests
 ```
 
 They are `unittest.TestCase` on purpose: the mapping tests run with the standard

@@ -322,6 +322,76 @@ Note this is the opposite direction from finding 17's blind exfiltration: the
 generator is simultaneously too permissive about the *source host* and too
 restrictive about *which data* can be taken.
 
+## 19. What the strategic run changed
+
+`observation/manual-run-strategic` is the first run at the level this repo
+targets, and it is frozen rather than live, so builds are reproducible. It is
+much better suited to the dataset than `manual-run`:
+
+| | `manual-run` | `manual-run-strategic` |
+|---|---:|---:|
+| detail level | operational | **strategic** |
+| still being written | yes | no |
+| action records | 38,680 | **807** |
+| `bash-command` (0.995 attribution) | 28 | **19** |
+| states | 39 | 12 |
+| labels | 8 | **8** (from 22 transitions) |
+| label types | 2 | **3** (+ScanNetwork) |
+
+The session is attack-shaped: `ping` -> `apt install nmap` -> `nmap -sP -n
+172.23.0.0/24` -> `nmap -sS 172.23.0.1` -> `cat /etc/passwd` -> `ssh test@... -p
+902`. Four issues it exposed, all now handled:
+
+**Scan artifacts flood `known_services`.** `nmap -sS` against one host left
+**999 service nodes with `status: "attempted"`** (confidence 0.7,
+`zeek_state: S0`) plus **1,000 `network-no-reply` block hypotheses** — the same
+artifact seen from the block-inference side. Only 5 of 1,007 service nodes carry
+`open`/`listening`. Worse, they are attributed to **`host:local`, the scanner**,
+not to the scanned host, so projecting them would tell NSG the agent runs 999
+services on itself. `AdapterConfig.service_status_denylist` now drops nodes whose
+only status is `attempted`/`targeted`, keeping any node that also carries
+positive evidence. The mis-attribution is worth reporting to the state creator:
+the ports belong to the scan *target*.
+
+**The one attack-relevant file was being dropped.** `/etc/passwd` arrives with
+`knowledge_source: "command-argument"`, `existence: "unknown"`, sourced from the
+TTY log, because the file monitor never reconciled `/etc`. Requiring filesystem
+confirmation kept two debconf caches and discarded the file the operator
+actually read. NSG's `known_data` means *the agent has discovered this data*, and
+a file named on the command line proves exactly that, so `_data_is_present` now
+accepts it (`accept_command_argument_data`).
+
+**No-effect actions were being dropped by the walker.** An action that changes
+nothing is recorded with `state_before == state_after` (`nmap -sP` sits at
+`state-000005 -> state-000005`), and pairing *consecutive* state ids never
+matches those buckets. Transitions now come from the action records themselves,
+which also recovers jumps like `state-000003 -> state-000005`. This alone took
+the run from 4 labels to 8, and it is the category the dataset most needs — see
+finding 17's argument about training only on successful transitions.
+
+**Operators do not scan the networks NSG knows.** The container knows
+`172.23.0.0/16`; the operator scanned `172.23.0.0/24`. `ScanNetwork` is
+parameterized by a known `Network` object, so the label maps to the containing
+network and records the granularity difference in a note. A range no known
+network contains is reported as `scan of a range that is not a known network`.
+
+Two caveats that remain, both worth knowing before the next capture:
+
+- **A successful service scan can leave no NSG trace.** `nmap -sS 172.23.0.1`
+  advanced the docker state, but its NSG projection is unchanged once the
+  `attempted` artifacts are filtered, so the label falls back to command-only.
+  Labels now say which case they came from ("docker state advanced but its NSG
+  projection is unchanged" vs "no state change followed").
+- **Batch attribution spreads one command across transitions.** The same
+  `nmap -sS` is labelled under both `state-000005 -> state-000008` and
+  `state-000006 -> state-000007`, because its duplicate collector records landed
+  in different buckets. With `causal_isolation: false` everywhere, this cannot be
+  resolved from the data; treat per-label counts as approximate.
+- **Effect-only labels can be observer artifacts.** One `FindServices` label
+  comes from services appearing during `apt update`, not from a scan — no command
+  in the batch matched, which is why the label is marked `effect` at confidence
+  0.54 rather than corroborated.
+
 ---
 
 ## What works

@@ -182,8 +182,29 @@ def _source_rank(record: Dict[str, Any]) -> int:
     return SOURCE_PRIORITY.get(str(record.get("source", "")), 99)
 
 
-def transitions(sequence: Sequence[Dict[str, Any]]) -> List[Tuple[str, str]]:
-    """Consecutive state pairs in the recorded order."""
+def transitions(
+    sequence: Sequence[Dict[str, Any]], grouped: Optional[Dict[Tuple[str, str], Any]] = None
+) -> List[Tuple[str, str]]:
+    """The (state_before, state_after) pairs to label.
+
+    Taken from the action records themselves, not from consecutive state ids.
+    Two shapes would be lost otherwise:
+
+    * **self-loops.** An action that changed nothing is recorded with
+      `state_before == state_after` (`nmap -sP` sits at
+      `state-000005 -> state-000005` in the strategic sample run). These are the
+      no-effect actions a dataset most needs, and pairing consecutive states
+      drops every one of them.
+    * **jumps.** A settle window can span several snapshots, so
+      `apt install nmap` bridges `state-000003 -> state-000005` directly.
+
+    Falls back to consecutive pairs when no action records are available, so a
+    trajectory of states alone still yields transitions.
+    """
+    if grouped:
+        return sorted(
+            key for key in grouped if all(part for part in key)
+        )
     state_ids = [str(entry["id"]) for entry in sequence if entry.get("kind") == "state"]
     return list(zip(state_ids, state_ids[1:]))
 
@@ -204,7 +225,7 @@ def build(
 
     sequence = read_sequence(trajectory_dir)
     grouped = group_actions(sequence, trajectory_dir, max_records_per_transition)
-    state_pairs = transitions(sequence)
+    state_pairs = transitions(sequence, grouped)
 
     result = BuildResult()
     report = result.report
@@ -280,6 +301,7 @@ def build(
             commands=bucket.commands,
             provenance=before_projection.provenance,
             docker_evidence=docker_evidence,
+            states_differ=before_id != after_id,
         )
 
         if diff.empty:

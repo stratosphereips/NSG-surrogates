@@ -86,9 +86,24 @@ class AdapterConfig:
     include_inferred_networks: bool = False
     #: Networks that are routes, not attack surface.
     excluded_cidrs: FrozenSet[str] = frozenset({"0.0.0.0/0", "::/0"})
+    #: Statuses that mean a service node records *our own traffic* rather than
+    #: a service: a 1000-port `nmap -sS` leaves 999 nodes with
+    #: `status: "attempted"` (confidence 0.7, `zeek_state: S0`), attributed to
+    #: the scanning host. Projecting those fills NSG's known_services with the
+    #: agent's own scan. A node carrying positive evidence too
+    #: (`service_status_positive`) is kept, and a node with no status at all is
+    #: kept — a missing optional field is not grounds for dropping a fact.
+    #: Empty set disables the filter.
+    service_status_denylist: FrozenSet[str] = frozenset({"attempted", "targeted"})
+    #: Statuses that are direct evidence a service exists; these override the
+    #: denylist when a node carries both (`["listening", "attempted"]`).
+    service_status_positive: FrozenSet[str] = frozenset({"open", "listening", "observed"})
     #: Drop data whose existence the observer could not confirm (created and
     #: then deleted files arrive as `existence: "unknown"`).
     require_confirmed_data: bool = True
+    #: Treat a file named on the operator's command line as discovered data even
+    #: when the filesystem monitor never reconciled it. See `_data_is_present`.
+    accept_command_argument_data: bool = True
     data_path_denylist: Tuple[str, ...] = DEFAULT_DATA_PATH_DENYLIST
     #: Cap per host; NSG's ExfiltrateData action space is |data| x |controlled|.
     max_data_per_host: int = 32
@@ -414,6 +429,13 @@ def project_graph_to_game_state(
             report.drops.append(Drop("service", node_id, "below min_confidence", label))
             continue
 
+        statuses = _status_set(attributes.get("status"))
+        if (statuses & config.service_status_denylist) and not (
+            statuses & config.service_status_positive
+        ):
+            report.drops.append(Drop("service", node_id, f"status={sorted(statuses)}", label))
+            continue
+
         host = host_ip_by_node.get(str(attributes.get("host_id", "")))
         if host is None:
             report.drops.append(Drop("service", node_id, "host not projected", label))
@@ -454,7 +476,9 @@ def project_graph_to_game_state(
         if not locator:
             report.drops.append(Drop("data", node_id, "no locator", label))
             continue
-        present, presence_reason = _data_is_present(attributes)
+        present, presence_reason = _data_is_present(
+            attributes, accept_command_argument=config.accept_command_argument_data
+        )
         if config.require_confirmed_data and not present:
             report.drops.append(Drop("data", node_id, presence_reason, label))
             continue
@@ -633,18 +657,37 @@ def _sole_address_owners(nodes_by_id: Dict[str, Dict[str, Any]]) -> Dict[str, st
     return owners
 
 
-def _data_is_present(attributes: Dict[str, Any]) -> Tuple[bool, str]:
-    """Decide whether a data node describes a file that is there now.
+def _status_set(status: Any) -> Set[str]:
+    """Normalise a node's `status`, which may be a string or a list."""
+    if status is None:
+        return set()
+    values = status if isinstance(status, (list, tuple)) else [status]
+    return {str(value).strip().lower() for value in values if str(value).strip()}
 
-    The state creator reports this two ways and neither is a simple boolean:
+
+def _data_is_present(
+    attributes: Dict[str, Any], accept_command_argument: bool = True
+) -> Tuple[bool, str]:
+    """Decide whether a data node belongs in NSG's `known_data`.
+
+    The state creator reports existence two ways and neither is a plain boolean:
     `exists` is `true`, or `[true, false]` when the file was observed both
-    present and absent (created then deleted — 58 of 136 nodes in the sample
-    run), and `existence: "unknown"` appears on nodes it could not reconcile.
-    Only an unambiguous `true` is projected as `known_data`.
+    present and absent (created then deleted), and `existence: "unknown"`
+    appears on nodes it could not reconcile.
+
+    Filesystem confirmation is not the only evidence that matters, though.
+    NSG's `known_data` means *the agent has discovered this data*, and a file
+    named on the operator's command line proves exactly that — `/etc/passwd` in
+    the strategic sample run arrives with `knowledge_source:
+    "command-argument"`, `existence: "unknown"`, sourced from the TTY log,
+    because the file monitor never reconciled `/etc`. Requiring filesystem
+    confirmation would drop the one attack-relevant file in the run while
+    keeping two debconf caches that inotify happened to see.
     """
     existence = attributes.get("existence")
     if existence == "confirmed":
         return True, "confirmed"
+
     exists = attributes.get("exists")
     if exists is True:
         return True, "exists"
@@ -655,6 +698,12 @@ def _data_is_present(attributes: Dict[str, Any]) -> Tuple[bool, str]:
         return False, "existence unstable (observed present and absent)"
     if exists is False:
         return False, "observed absent"
+
+    if accept_command_argument and "command-argument" in _status_set(
+        attributes.get("knowledge_source")
+    ):
+        return True, "named in a command"
+
     if existence is not None:
         return False, f"existence={existence!r}"
     return False, "existence not reported"

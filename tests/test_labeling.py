@@ -232,7 +232,24 @@ class CommandOnlyLabelTests(unittest.TestCase):
         self.assertEqual(action.type, ActionType.FindData)
         self.assertEqual(action.parameters["target_host"], LOCAL)
         self.assertEqual(result.labels[0].label_source, "command")
-        self.assertTrue(any("no NSG-visible state change" in n for n in result.labels[0].notes))
+        self.assertTrue(
+            any("no state change followed" in note for note in result.labels[0].notes)
+        )
+
+    def test_note_distinguishes_an_invisible_effect_from_no_effect(self):
+        """A scan whose result the mapping filters out is not a no-op."""
+        state = base_state()
+        commands = [
+            parse_command({"command": {"argv": ["cat", "/etc/passwd"], "executable": "cat"}})
+        ]
+        result = label_transition(
+            state, state, diff_states(state, state), commands=commands,
+            provenance=provenance(), states_differ=True,
+        )
+        self.assertTrue(
+            any("invisible to the mapping" in note for note in result.labels[0].notes),
+            result.labels[0].notes,
+        )
 
     def test_repeated_commands_collapse_into_one_label(self):
         state = base_state()

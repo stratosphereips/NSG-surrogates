@@ -29,6 +29,9 @@ def _adapter_config(args: argparse.Namespace) -> AdapterConfig:
         require_confirmed_data=not args.unconfirmed_data,
         data_path_denylist=() if args.no_data_denylist else AdapterConfig.data_path_denylist,
         max_data_per_host=args.max_data_per_host,
+        service_status_denylist=(
+            frozenset() if args.any_service_status else AdapterConfig.service_status_denylist
+        ),
         scope_cidrs=frozenset(args.scope or ()),
         external_hosts=frozenset(args.external_host or ()),
     )
@@ -44,6 +47,11 @@ def _add_adapter_flags(parser: argparse.ArgumentParser) -> None:
         help="keep data whose existence the observer could not confirm",
     )
     parser.add_argument("--no-data-denylist", action="store_true", help="keep OS/container noise paths")
+    parser.add_argument(
+        "--any-service-status",
+        action="store_true",
+        help="keep services the observer only saw attempted (our own scan traffic)",
+    )
     parser.add_argument("--max-data-per-host", type=int, default=AdapterConfig.max_data_per_host)
     parser.add_argument(
         "--scope",
@@ -167,7 +175,7 @@ def cmd_dataset(args: argparse.Namespace) -> int:
     result = dataset_mod.build(
         args.path,
         config=_adapter_config(args),
-        max_records_per_transition=args.max_records_per_transition,
+        max_records_per_transition=args.max_records_per_transition or None,
     )
     report = result.report
 
