@@ -75,23 +75,23 @@ label counts drift between builds.
 
 ```bash
 export OBS=/opt/Agents/NSG-docker-state-creator/observation/manual-run-strategic
-export SCOPE="--scope 172.23.0.0/16"          # in-range targets only (finding 1)
-export DROP="--external-host 10.9.9.9"        # exfiltration destination (finding 2)
+export SCOPE=172.23.0.0/16    # in-range targets only (finding 1)
+export DROP=10.9.9.9          # exfiltration destination (finding 2)
 ```
 
 **1. See what the mapping keeps and what it discards.** Nothing is written.
 
 ```bash
-python -m nsg_surrogate inspect $OBS $SCOPE $DROP
-python -m nsg_surrogate inspect $OBS $SCOPE $DROP --show-drops 20   # individual entities
-python -m nsg_surrogate inspect $OBS $SCOPE $DROP --json            # machine-readable
+python -m nsg_surrogate inspect $OBS --scope $SCOPE --external-host $DROP
+python -m nsg_surrogate inspect $OBS --scope $SCOPE --external-host $DROP --show-drops 20   # individual entities
+python -m nsg_surrogate inspect $OBS --scope $SCOPE --external-host $DROP --json            # machine-readable
 ```
 
 **2. Look at the projected NSG state itself**, serialised exactly as the
 simulator would:
 
 ```bash
-python -m nsg_surrogate state $OBS $SCOPE $DROP
+python -m nsg_surrogate state $OBS --scope $SCOPE --external-host $DROP
 ```
 
 **3. Build the dataset.** Writes to `datasets/<run_id>/` by default; add
@@ -100,15 +100,15 @@ per-transition cap on how many collector records are loaded (exact but slower â€
 `manual-run` has ~39k records).
 
 ```bash
-python -m nsg_surrogate dataset $OBS $SCOPE $DROP --max-records-per-transition 0
+python -m nsg_surrogate dataset $OBS --scope $SCOPE --external-host $DROP --max-records-per-transition 0
 ```
 
 **4. Train.** Takes one or more dataset directories; writes
 `models/surrogate.pth` and `models/surrogate.metrics.json` by default.
 
 ```bash
-python -m nsg_surrogate train datasets/* $SCOPE $DROP --epochs 300 --lr 0.005
-python -m nsg_surrogate train datasets/* $SCOPE $DROP \
+python -m nsg_surrogate train datasets/* --scope $SCOPE --external-host $DROP --epochs 300 --lr 0.005
+python -m nsg_surrogate train datasets/* --scope $SCOPE --external-host $DROP \
     --holdout-run manual-run --name surrogate-holdout    # honest split, when you have runs to spare
 ```
 
@@ -117,7 +117,7 @@ chose. Omit `--weights` for a randomly initialised policy, which is still useful
 for exercising the whole path:
 
 ```bash
-python -m nsg_surrogate act $OBS $SCOPE $DROP \
+python -m nsg_surrogate act $OBS --scope $SCOPE --external-host $DROP \
     --weights models/surrogate.pth --temperature 0.1
 ```
 
