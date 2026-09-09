@@ -21,6 +21,13 @@ from netsecgame.game_components import ActionType
 from . import candidates as candidates_mod
 from .state_adapter import AdapterConfig, Projection, project_path
 
+#: Default output locations, relative to the working directory. Both hold
+#: regenerable artifacts — copied state graphs are megabytes apiece — so they
+#: are git-ignored and rebuilt from the observation runs rather than committed.
+DATASETS_DIR = os.environ.get("NSG_SURROGATE_DATASETS", "datasets")
+MODELS_DIR = os.environ.get("NSG_SURROGATE_MODELS", "models")
+DEFAULT_MODEL_NAME = "surrogate"
+
 
 def _adapter_config(args: argparse.Namespace) -> AdapterConfig:
     return AdapterConfig(
@@ -179,13 +186,14 @@ def cmd_dataset(args: argparse.Namespace) -> int:
     )
     report = result.report
 
-    if args.out:
+    out_dir = None if args.no_write else (args.out or os.path.join(DATASETS_DIR, report.run_id))
+    if out_dir:
         paths = dataset_mod.write(
-            result, args.out, dataset_mod._trajectory_dir(args.path)
+            result, out_dir, dataset_mod._trajectory_dir(args.path)
         )
         for name, path in paths.items():
             print(f"wrote {name:<11} {path}")
-        print(f"wrote graphs      {os.path.join(args.out, 'graphs')}/")
+        print(f"wrote graphs      {os.path.join(out_dir, 'graphs')}/")
         print()
 
     if args.json:
@@ -292,13 +300,18 @@ def cmd_train(args: argparse.Namespace) -> int:
         " — identical inputs with different labels cannot be fitted"
     )
 
-    if args.out:
-        result.weights_path = training.save(policy, args.out)
-        print(f"weights -> {result.weights_path}")
-    if args.metrics:
-        with open(args.metrics, "w", encoding="utf-8") as handle:
-            json.dump(result.as_dict(), handle, indent=2, sort_keys=True)
-        print(f"metrics -> {args.metrics}")
+    if args.no_write:
+        return 0
+
+    weights_path = args.out or os.path.join(MODELS_DIR, f"{args.name}.pth")
+    result.weights_path = training.save(policy, weights_path)
+    print(f"weights -> {result.weights_path}")
+
+    metrics_path = args.metrics or os.path.splitext(weights_path)[0] + ".metrics.json"
+    os.makedirs(os.path.dirname(os.path.abspath(metrics_path)) or ".", exist_ok=True)
+    with open(metrics_path, "w", encoding="utf-8") as handle:
+        json.dump(result.as_dict(), handle, indent=2, sort_keys=True)
+    print(f"metrics -> {metrics_path}")
     return 0
 
 
@@ -320,7 +333,15 @@ def build_parser() -> argparse.ArgumentParser:
         "dataset", help="build (state, action) pairs from a trajectory and report the yield"
     )
     _add_adapter_flags(dataset)
-    dataset.add_argument("--out", default=None, metavar="DIR", help="write the dataset here")
+    dataset.add_argument(
+        "--out",
+        default=None,
+        metavar="DIR",
+        help=f"write the dataset here (default: {DATASETS_DIR}/<run_id>)",
+    )
+    dataset.add_argument(
+        "--no-write", action="store_true", help="report only, do not write a dataset"
+    )
     dataset.add_argument(
         "--max-records-per-transition",
         type=int,
@@ -348,8 +369,26 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--unweighted", action="store_true", help="ignore label confidence as a sample weight"
     )
-    train.add_argument("--out", default=None, metavar="PATH", help="write the checkpoint here")
-    train.add_argument("--metrics", default=None, metavar="PATH", help="write metrics JSON here")
+    train.add_argument(
+        "--out",
+        default=None,
+        metavar="PATH",
+        help=f"checkpoint path (default: {MODELS_DIR}/{DEFAULT_MODEL_NAME}.pth)",
+    )
+    train.add_argument(
+        "--metrics",
+        default=None,
+        metavar="PATH",
+        help=f"metrics JSON path (default: alongside the checkpoint)",
+    )
+    train.add_argument(
+        "--name",
+        default=DEFAULT_MODEL_NAME,
+        help=f"model name used for the default paths (default: {DEFAULT_MODEL_NAME})",
+    )
+    train.add_argument(
+        "--no-write", action="store_true", help="train and report without saving anything"
+    )
     train.add_argument("--quiet", action="store_true")
     train.set_defaults(func=cmd_train)
 

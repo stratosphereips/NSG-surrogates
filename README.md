@@ -73,27 +73,80 @@ Nothing else is needed: `netsecgame` is already importable in that environment.
 The state-mapping half (`state_adapter`, `candidates`) has no torch dependency
 and runs under any Python 3.12+ with `netsecgame` on the path.
 
-## Commands
+## Run the whole pipeline
+
+Every command below is copy-pasteable from the repo root with `conda activate
+nsg`. `OBS` is one frozen observation run; **freeze it first** (`cp -a`, or stop
+`trajectory-monitor`) because a live run is still being appended to and its
+label counts drift between builds.
 
 ```bash
-# What does the mapping keep, and what does it throw away?
-python -m nsg_surrogate inspect /opt/Agents/NSG-docker-state-creator/observation/manual-run \
-    --scope 172.23.0.0/16 --external-host 10.9.9.9
-
-# (state, action) pairs from a trajectory, with the label yield per source
-python -m nsg_surrogate dataset <observation-dir> --scope 172.23.0.0/16 \
-    --external-host 10.9.9.9 --out datasets/manual-run
-
-# The projected NSG state, as the simulator would serialize it
-python -m nsg_surrogate state <observation-dir> --scope 172.23.0.0/16
-
-# One action, with the trace of what each head chose
-python -m nsg_surrogate act <observation-dir> --scope 172.23.0.0/16 \
-    --external-host 10.9.9.9 --weights best_blackbox_gnn.pth --temperature 0.1
+export OBS=/opt/Agents/NSG-docker-state-creator/observation/manual-run-strategic
+export SCOPE="--scope 172.23.0.0/16"          # in-range targets only (finding 1)
+export DROP="--external-host 10.9.9.9"        # exfiltration destination (finding 2)
 ```
 
-`inspect --json` emits the same report as machine-readable JSON;
-`inspect --show-drops N` lists individual dropped entities.
+**1. See what the mapping keeps and what it discards.** Nothing is written.
+
+```bash
+python -m nsg_surrogate inspect $OBS $SCOPE $DROP
+python -m nsg_surrogate inspect $OBS $SCOPE $DROP --show-drops 20   # individual entities
+python -m nsg_surrogate inspect $OBS $SCOPE $DROP --json            # machine-readable
+```
+
+**2. Look at the projected NSG state itself**, serialised exactly as the
+simulator would:
+
+```bash
+python -m nsg_surrogate state $OBS $SCOPE $DROP
+```
+
+**3. Build the dataset.** Writes to `datasets/<run_id>/` by default; add
+`--no-write` for the report alone. `--max-records-per-transition 0` disables the
+per-transition cap on how many collector records are loaded (exact but slower —
+`manual-run` has ~39k records).
+
+```bash
+python -m nsg_surrogate dataset $OBS $SCOPE $DROP --max-records-per-transition 0
+```
+
+**4. Train.** Takes one or more dataset directories; writes
+`models/surrogate.pth` and `models/surrogate.metrics.json` by default.
+
+```bash
+python -m nsg_surrogate train datasets/* $SCOPE $DROP --epochs 300 --lr 0.005
+python -m nsg_surrogate train datasets/* $SCOPE $DROP \
+    --holdout-run manual-run --name surrogate-holdout    # honest split, when you have runs to spare
+```
+
+**5. Emit one action** for the current state, with the trace of what each head
+chose. Omit `--weights` for a randomly initialised policy, which is still useful
+for exercising the whole path:
+
+```bash
+python -m nsg_surrogate act $OBS $SCOPE $DROP \
+    --weights models/surrogate.pth --temperature 0.1
+```
+
+Any flag in steps 1–4 that changes the projection (`--scope`, `--external-host`,
+`--min-confidence`, `--any-service-status`, `--unconfirmed-data`,
+`--no-data-denylist`, `--include-inferred-networks`, `--max-data-per-host`) must
+match between `dataset` and `train`: the trainer re-projects from the stored
+graphs, and it warns when the result differs from what the dataset recorded.
+
+## Where things are stored
+
+| Path | Contents | In git |
+|---|---|---|
+| `datasets/<run_id>/` | `pairs.jsonl`, `graphs/`, `unmappable.jsonl`, `report.json` | no |
+| `models/<name>.pth` | checkpoint (~680 KB) | no |
+| `models/<name>.metrics.json` | load report, per-epoch losses, eval metrics | no |
+
+Both directories are git-ignored and fully regenerable from the observation
+runs: a dataset copies every state graph it references, and those are ~2 MB
+apiece (27 MB for the two runs here). Override the locations with
+`NSG_SURROGATE_DATASETS` / `NSG_SURROGATE_MODELS`, or per-invocation with
+`--out`.
 
 ### Two flags that are not optional in practice
 
