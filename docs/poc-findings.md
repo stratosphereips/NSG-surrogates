@@ -49,6 +49,7 @@ does about it, then what remains unresolved.
 | 18 | NetSecGame's generator emits exfiltrations the game rejects | action vocabulary |
 | 19 | What the strategic run changed, and what it revealed | attribution |
 | 20 | Accuracy is bounded by how many states the projection can distinguish | fitting |
+| 21 | A trajectory may involve more than one machine | attribution |
 
 ---
 
@@ -286,6 +287,43 @@ single command. Effect-derived labels are therefore batch-level, which bounds
 their confidence, and the same command can be labelled under more than one
 transition (finding 19).
 
+## 21. A trajectory may involve more than one machine
+
+A recording is produced by an observer inside one container, so the commands it
+captures were executed there. It does not follow that the trajectory concerns a
+single machine: an agent that gains control of a second host acts from there as
+well, and every NetSecGame action carries a `source_host`.
+
+The recorded evidence does not identify the issuing host. An action record
+carries `actor` (pid, tty, uid, and a username on 5 of 807 records in the
+strategic run), `targets` (the addresses the action was aimed at) and `scope`
+(`unknown` on 796 records, `network` on 6, `local` on 4). None of these names the
+host from which the command was issued, because the observer only ever sees its
+own container.
+
+Two ways a second machine enters a trajectory, attributed differently:
+
+* **a second observer on that host.** Its own container is `host:local` in its
+  own recording, so attribution is correct per recording. Combining recordings
+  then requires each run's local host, which the projection already reports in
+  `Provenance.local_hosts`.
+* **remote execution from the observed host**, such as `ssh host "nmap ..."`.
+  The observer records the wrapper but not what it ran, so the inner action's
+  source host cannot be recovered from this evidence.
+
+**Implemented.** `infer_source_host` prefers the observed host, which is correct
+for commands this observer recorded, but records the choice as a note whenever
+the state contains more than one controlled host — the recording cannot
+establish that the observed host was the one that acted. A remote-execution
+wrapper naming an already-controlled host is reported as
+`command executed on another host` rather than attributed to the observed host.
+A wrapper naming a host that is not yet controlled is an access attempt, and is
+labelled `ExploitService` by the ordinary rules.
+
+**Unresolved.** For actions taken through a wrapper, neither the action nor the
+state it changed on the remote host is in this recording. Recovering them
+requires an observer on that host.
+
 ## 19. What the strategic run changed, and what it revealed
 
 `manual-run-strategic` is the first run at the detail level this repository
@@ -512,7 +550,7 @@ finding 7 notes that 11 feature positions are unused.
   `ExploitService` zero times where the untrained policy selects it 78 times.
   Neither wins, because the training set contains no exploitation or
   exfiltration (README, *Measured behaviour of the current checkpoint*).
-- **Determinism and coverage.** 108 tests; the projection and labelling tests
+- **Determinism and coverage.** 114 tests; the projection and labelling tests
   require only the standard library, and no test requires another repository to
   be checked out.
 - **Pairing requires no heuristics.** The trajectory layer's `state_before` and

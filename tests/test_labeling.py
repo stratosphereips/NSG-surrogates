@@ -8,6 +8,7 @@ from nsg_surrogate import candidates
 from nsg_surrogate.labeling import (
     CommandFacts,
     Label,
+    infer_source_host,
     label_transition,
     merge_labels,
     parse_command,
@@ -305,6 +306,80 @@ class CommandParsingTests(unittest.TestCase):
 
     def test_record_without_argv(self):
         self.assertIsNone(parse_command({"command": {}}))
+
+
+class SourceHostTests(unittest.TestCase):
+    """A trajectory may involve several machines, so attribution is explicit."""
+
+    def test_single_controlled_host_needs_no_note(self):
+        state = base_state()
+        host, note = infer_source_host(state, provenance())
+        self.assertEqual(host, LOCAL)
+        self.assertIsNone(note)
+
+    def test_several_controlled_hosts_are_noted_even_with_a_local_host(self):
+        """The recording cannot establish which controlled host acted."""
+        state = base_state(
+            controlled_hosts={LOCAL, TARGET}, known_hosts={LOCAL, TARGET}
+        )
+        host, note = infer_source_host(state, provenance())
+        self.assertEqual(host, LOCAL, "the observed host is still preferred")
+        self.assertIsNotNone(note)
+        self.assertIn("cannot confirm", note)
+
+    def test_without_provenance_the_choice_is_noted(self):
+        state = base_state(
+            controlled_hosts={LOCAL, TARGET}, known_hosts={LOCAL, TARGET}
+        )
+        host, note = infer_source_host(state, None)
+        self.assertIn(host, {LOCAL, TARGET})
+        self.assertIn("no observed host", note)
+
+    def test_no_controlled_host_yields_none(self):
+        host, note = infer_source_host(GameState(known_networks={NET}), provenance())
+        self.assertIsNone(host)
+        self.assertIsNone(note)
+
+    def test_remote_execution_on_a_controlled_host_is_unmappable(self):
+        """`ssh controlled-host "nmap ..."` acts from a host we do not observe."""
+        state = base_state(
+            controlled_hosts={LOCAL, TARGET}, known_hosts={LOCAL, TARGET}
+        )
+        commands = [
+            parse_command(
+                {
+                    "command": {
+                        "argv": ["ssh", "root@10.0.0.9", "nmap -sn 10.0.0.0/24"],
+                        "executable": "ssh",
+                    }
+                }
+            )
+        ]
+        result = label_transition(
+            state, state, diff_states(state, state), commands=commands,
+            provenance=provenance(),
+        )
+        self.assertIn(
+            "command executed on another host",
+            {item.category for item in result.unmappable},
+        )
+
+    def test_ssh_to_an_uncontrolled_host_is_an_access_attempt_not_remote_execution(self):
+        state = base_state(
+            known_hosts={LOCAL, TARGET}, known_services={TARGET: {SSH}}
+        )
+        commands = [
+            parse_command({"command": {"argv": ["ssh", "root@10.0.0.9"], "executable": "ssh"}})
+        ]
+        result = label_transition(
+            state, state, diff_states(state, state), commands=commands,
+            provenance=provenance(),
+        )
+        self.assertNotIn(
+            "command executed on another host",
+            {item.category for item in result.unmappable},
+        )
+        self.assertEqual(label_types(result), {ActionType.ExploitService})
 
 
 class CandidateGateTests(unittest.TestCase):

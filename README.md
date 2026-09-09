@@ -318,7 +318,7 @@ command with `--out`.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests        # 108 tests
+python -m unittest discover -s tests        # 114 tests
 ```
 
 They are written as `unittest.TestCase`: the projection and labelling tests need
@@ -455,3 +455,7 @@ consistency check on the implementation.
   (`causal_isolation` is false throughout), and 19 of 807 records in the
   strategic run come from the high-confidence interactive-shell collector
   (findings 16 and 19).
+- The host that issued an action is not recorded. The observed container is
+  preferred, and the choice is noted whenever more than one host is controlled;
+  actions taken through a remote-execution wrapper are reported rather than
+  attributed (finding 21).

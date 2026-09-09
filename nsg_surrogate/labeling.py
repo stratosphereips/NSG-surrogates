@@ -410,6 +410,7 @@ def label_transition(
     result.labels = merge_labels(result.labels)
 
     result.unmappable.extend(_blind_exfiltration(before, commands, source_host, evidence_base))
+    result.unmappable.extend(_remote_execution(before, commands, evidence_base))
     result.unmappable.extend(_unmappable_scan_ranges(before, commands, evidence_base))
 
     # ── commands that changed nothing ─────────────────────────────────────────
@@ -681,37 +682,104 @@ def _ground_command(
 def infer_source_host(
     before: GameState, provenance: Optional[Provenance]
 ) -> Tuple[Optional[IP], Optional[str]]:
-    """Determine which host performed the action.
+    """Determine which host issued the action.
 
-    A trajectory is recorded inside a single container, so every observed action
-    was issued from that container, which the state creator identifies as
-    `host:local`. That assumption is applied here. When the state offers more
-    than one candidate the choice is recorded as a note on the label, so that a
-    violation of the assumption is visible in the data rather than producing an
-    incorrect `source_host` without indication.
+    A recording is produced by an observer inside one container, so the commands
+    it captures were executed in that container, which the state creator
+    identifies as `host:local`. That host is therefore preferred.
+
+    It does not follow that a trajectory concerns a single machine. An agent that
+    gains control of a second host acts from there as well, and the two ways that
+    happens are attributed differently:
+
+    * a second observer on that host produces its own recording, in which its
+      own container is `host:local`, so the attribution is correct per recording;
+    * the agent issues commands through a remote-execution wrapper such as
+      `ssh host "..."`. The observer sees the wrapper but not what it ran, so the
+      inner action's host cannot be recovered from this evidence.
+
+    Consequently the choice is recorded as a note whenever the state contains
+    more than one controlled host, even when a local host is identified: the
+    recording cannot establish that the local host was the one that acted. Where
+    the host cannot be determined at all, `None` is returned and the transition
+    is reported as unmappable rather than attributed arbitrarily.
     """
-    if provenance is not None:
-        local_controlled = sorted(
-            provenance.local_hosts & set(before.controlled_hosts), key=str
-        )
-        if len(local_controlled) == 1:
-            return local_controlled[0], None
-        if len(local_controlled) > 1:
-            return (
-                local_controlled[0],
-                f"{len(local_controlled)} local controlled hosts; assumed {local_controlled[0]}",
-            )
-
     controlled = sorted(before.controlled_hosts, key=str)
     if not controlled:
         return None, None
+
+    local_controlled = (
+        sorted(provenance.local_hosts & set(before.controlled_hosts), key=str)
+        if provenance is not None
+        else []
+    )
+
+    if len(local_controlled) == 1:
+        chosen = local_controlled[0]
+        if len(controlled) == 1:
+            return chosen, None
+        return (
+            chosen,
+            f"{len(controlled)} controlled hosts; attributed to the observed host "
+            f"{chosen}, which the recording cannot confirm acted",
+        )
+
+    if len(local_controlled) > 1:
+        return (
+            local_controlled[0],
+            f"{len(local_controlled)} controlled hosts are marked local; "
+            f"attributed to {local_controlled[0]}",
+        )
+
     if len(controlled) == 1:
-        return controlled[0], "source_host assumed from the single controlled host"
+        return controlled[0], "attributed to the only controlled host"
     return (
         controlled[0],
-        f"no local host in provenance and {len(controlled)} controlled hosts; "
-        f"assumed {controlled[0]}",
+        f"no observed host among {len(controlled)} controlled hosts; "
+        f"attributed to {controlled[0]}",
     )
+
+
+#: Executables that run a command on another host. The observer records the
+#: wrapper, not what it executed there.
+REMOTE_EXECUTION = frozenset(
+    {"ssh", "sshpass", "psexec.py", "smbclient", "winrs", "kubectl", "docker"}
+)
+
+
+def _remote_execution(
+    before: GameState, commands: Sequence[CommandFacts], evidence_base: Dict[str, Any]
+) -> List[Unmappable]:
+    """Commands that ran on a host this recording does not observe.
+
+    `ssh controlled-host "nmap ..."` performs an action whose `source_host` is
+    the remote host, but the observer sees only the wrapper: the inner command,
+    and any state it changed there, are outside this recording. Attributing such
+    an action to the observed host would name the wrong source, so the case is
+    recorded instead.
+
+    A wrapper naming a host that is *not* yet controlled is an access attempt
+    rather than remote execution, and is labelled as `ExploitService` by the
+    ordinary rules.
+    """
+    unmappable: List[Unmappable] = []
+    for facts in commands:
+        if facts.executable not in REMOTE_EXECUTION:
+            continue
+        for address in facts.ips:
+            host = IP(address)
+            if host not in before.controlled_hosts:
+                continue
+            unmappable.append(
+                Unmappable(
+                    "command executed on another host",
+                    f"{facts.executable} ran a command on {host}, which the agent already "
+                    "controls; the action taken there has a different source_host and is "
+                    "not observed by this recording",
+                    dict(evidence_base, host=str(host), command=facts.shell_text),
+                )
+            )
+    return unmappable
 
 
 def _pick_exploited_service(
