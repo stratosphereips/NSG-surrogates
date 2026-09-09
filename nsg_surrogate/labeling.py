@@ -689,14 +689,12 @@ def infer_source_host(
     identifies as `host:local`. That host is therefore preferred.
 
     It does not follow that a trajectory concerns a single machine. An agent that
-    gains control of a second host acts from there as well, and the two ways that
-    happens are attributed differently:
-
-    * a second observer on that host produces its own recording, in which its
-      own container is `host:local`, so the attribution is correct per recording;
-    * the agent issues commands through a remote-execution wrapper such as
-      `ssh host "..."`. The observer sees the wrapper but not what it ran, so the
-      inner action's host cannot be recovered from this evidence.
+    gains control of a second host acts from there as well, and the recorded
+    evidence does not currently identify the issuing host: an action record
+    carries `actor`, `targets` and `scope`, none of which names it. The observer
+    is intended to follow the agent, at which point the source should be read
+    from the record instead of preferred here — see `docs/poc-findings.md`
+    finding 21 for the fields that would be needed.
 
     Consequently the choice is recorded as a note whenever the state contains
     more than one controlled host, even when a local host is identified: the

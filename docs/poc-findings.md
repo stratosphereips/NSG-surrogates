@@ -320,9 +320,34 @@ wrapper naming an already-controlled host is reported as
 A wrapper naming a host that is not yet controlled is an access attempt, and is
 labelled `ExploitService` by the ordinary rules.
 
-**Unresolved.** For actions taken through a wrapper, neither the action nor the
-state it changed on the remote host is in this recording. Recovering them
-requires an observer on that host.
+**Planned resolution.** The observer is intended to follow the agent, so future
+recordings will contain the actions taken on remote hosts and those hosts'
+state as well. Two things then need to be readable from the data, and neither is
+present in `nsg-state-graph/1.1`:
+
+* **which host issued each action.** The action record carries `actor`,
+  `targets` and `scope`, none of which names the issuing host. A field on the
+  record, or an actor-to-host mapping, would let `infer_source_host` read the
+  source rather than prefer the observed container, and would turn the
+  `command executed on another host` category into an ordinary label.
+* **what `local` means when the observer follows the agent.** The graph reports a
+  single `local_host_id`, and the projection marks hosts with `attributes.local`
+  as local (`Provenance.local_hosts`, a set, so several are already
+  representable). If the observer follows the agent, either several hosts become
+  local or the field denotes the agent's current position; those two readings
+  imply different attribution, so the intended one should be stated in the
+  schema.
+
+Until then, `infer_source_host` resolves several local controlled hosts by
+taking the first in sorted order and recording a note, which is a placeholder
+rather than an inference. With a following observer that branch becomes the
+common case and should be replaced by the recorded issuing host.
+
+Two consequences worth noting: `Service.is_local` is derived from the same
+`local_hosts` set, so its meaning changes with the field; and once a second host
+is genuinely reported as controlled, exfiltration becomes reachable from the
+observation itself, reducing the need for the declared external host in
+finding 2 to the case of a destination outside the range.
 
 ## 19. What the strategic run changed, and what it revealed
 
