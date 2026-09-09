@@ -1,9 +1,9 @@
-"""Tests for playing the surrogate inside NetSecGame.
+"""Tests for running the surrogate as a NetSecGame agent.
 
-Everything here runs without a game server: the decision logic lives in
-`SurrogateController` and the aggregation in `aggregate`, both socket-free. What
-cannot be covered offline is the socket conversation itself, which is why
-`SurrogateAgent` is kept to episode plumbing only.
+These run without a game server: action selection is in `SurrogateController`
+and the statistics in `aggregate`, neither of which opens a connection. The
+exchange with the server cannot be covered this way, which is why
+`SurrogateAgent` contains only the connection and the episode loop.
 """
 
 import importlib.util

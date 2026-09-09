@@ -1,7 +1,8 @@
-"""Tests for the trajectory walker and the dataset writer.
+"""Tests for reading a trajectory and writing a dataset.
 
-A synthetic trajectory is built on disk in the layout NSG-docker-state-creator
-produces, so these cover the file contract as well as the labelling.
+A synthetic trajectory is constructed on disk in the layout
+NSG-docker-state-creator produces, so these cover the file format as well as the
+labelling.
 """
 
 import copy

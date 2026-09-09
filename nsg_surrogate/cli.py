@@ -1,11 +1,18 @@
 """Command line entry point: `python -m nsg_surrogate <command>`.
 
-    inspect   project a docker state graph and report what the mapping loses
-    state     print the projected GameState as NSG JSON
-    act       choose one parameterized NSG action for a state graph (needs torch)
+    inspect   project a state graph and report what was kept and discarded
+    state     print the projected GameState in NetSecGame's serialisation
+    dataset   build labelled (state, action) rows from a trajectory
+    train     fit a policy to one or more datasets            (needs torch)
+    play      run the fitted policy against a game server     (needs torch)
+    act       select one action for a recorded state           (needs torch)
 
-`inspect` and `state` need only `netsecgame` on the path; `act` additionally
-needs torch and torch-geometric.
+`inspect`, `state` and `dataset` require only `netsecgame`. The remaining
+commands also require torch and torch-geometric.
+
+Every command that projects a state graph accepts the same options, and the
+values used by `dataset` must be repeated for `train`, which re-projects from
+the stored graphs.
 """
 
 from __future__ import annotations
@@ -63,7 +70,7 @@ def _add_adapter_flags(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="CIDR",
         help="network that is in scope as a target; repeatable. Without it, every host "
-        "the container ever talked to becomes an NSG target, including the public internet",
+        "the container ever talked to becomes an NetSecGame target, including the public internet",
     )
     parser.add_argument(
         "--external-host",
@@ -215,7 +222,7 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         f"   (NSG-visible diff empty in {report.transitions_with_empty_diff})"
     )
     if report.knowledge_lost:
-        print(f"knowledge lost (unrepresentable in NSG): {report.knowledge_lost}")
+        print(f"knowledge lost (unrepresentable in NetSecGame): {report.knowledge_lost}")
     print()
 
     if report.unmappable:
@@ -356,7 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nsg_surrogate", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    inspect = subparsers.add_parser("inspect", help="report the docker -> NSG mapping")
+    inspect = subparsers.add_parser("inspect", help="report the docker -> NetSecGame mapping")
     _add_adapter_flags(inspect)
     inspect.add_argument("--json", action="store_true")
     inspect.add_argument("--show-drops", type=int, default=0, metavar="N")
@@ -453,7 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
     play_parser.add_argument(
         "--raw-action-space",
         action="store_true",
-        help="keep NSG's exfiltrations from uncontrolled source hosts, for parity "
+        help="keep NetSecGame's exfiltrations from uncontrolled source hosts, for parity "
         "with the simulator agent's candidate set",
     )
     play_parser.add_argument(
@@ -468,7 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     play_parser.add_argument("--verbose", action="store_true")
     play_parser.set_defaults(func=cmd_play)
 
-    act = subparsers.add_parser("act", help="choose one NSG action (needs torch)")
+    act = subparsers.add_parser("act", help="choose one NetSecGame action (needs torch)")
     _add_adapter_flags(act)
     act.add_argument("--weights", default=None, help="policy checkpoint; random init when omitted")
     act.add_argument("--temperature", type=float, default=0.1)

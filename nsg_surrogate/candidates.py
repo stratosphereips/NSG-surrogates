@@ -1,25 +1,22 @@
-"""Candidate action enumeration for a projected `GameState`.
+"""The set of actions that are valid in a projected `GameState`.
 
-The factored policy never scores a free-form action: every head is masked
-against the candidate set, so this module defines what the surrogate is allowed
-to emit. `netsecgame`'s own `generate_valid_actions` is the base, so the
-surrogate's action space is the one an agent trained in the simulator learned
-against — that identity is the premise of porting a policy out to the real
-range.
+Every head of the policy is masked against this set, so the module defines what
+the surrogate may select. The set is produced by `netsecgame`'s own
+`generate_valid_actions`, which keeps the action space identical to the one the
+simulator's agents are trained against.
 
-One correction is applied on top: at the time of writing, the upstream generator
-emits `ExfiltrateData` from hosts the agent does not control, which the game
-itself will not execute (see `enumerate_actions`). Knowing where data resides
-does not imply being able to copy it from there. The omission has been reported
-upstream; once it is fixed the correction removes nothing and can stay in place
-or be dropped.
+One filter is applied on top. The upstream generator currently offers
+`ExfiltrateData` from hosts the agent does not control, and the game does not
+carry those out; knowing where data resides does not imply being able to copy it
+from there. The omission is reported upstream, and once it is fixed the filter
+removes nothing (see `enumerate_actions`).
 
-Not representable at all, and therefore not in the candidate set: exfiltrating
-data from a *controlled* host without having discovered it first — the blind
-`scp /etc/shadow` that a real operator performs routinely. NSG enumerates
-exfiltration over `known_data` only, so the action has no expression until the
-vocabulary is extended. `labeling` records those attempts as unmappable rather
-than inventing candidates for them.
+One action a real operator performs is absent from the set and cannot be added:
+copying a file from a controlled host without having discovered it first, as in
+`scp /etc/shadow`. NetSecGame enumerates exfiltration over `known_data`, so an
+undiscovered file has no representation, and the policy's data head has no node
+to score. `labeling` records such attempts as unmappable rather than
+constructing candidates for them.
 """
 
 from __future__ import annotations
@@ -30,21 +27,21 @@ from netsecgame.game_components import Action, ActionType, GameState
 from netsecgame.utils.utils import generate_valid_actions
 
 def action_key(action: Action) -> Tuple[ActionType, Tuple[Tuple[str, Any], ...]]:
-    """Order-independent identity for an action.
+    """An identity for an action that does not depend on parameter order.
 
-    `Action.as_dict` (and therefore `to_json`) serialises parameters in
-    insertion order, so two actions that are semantically the same compare
-    unequal as JSON when their keys were assigned in a different order — which
-    is exactly what happens between `generate_valid_actions` and any action
-    built by hand. Comparing a sorted tuple of parameters instead uses the
-    parameter objects' own equality (`IP`, `Network`, `Service` and `Data` are
-    all frozen and hashable), so the key is both correct and usable in a set.
+    `Action.as_dict`, and therefore `to_json`, serialises parameters in
+    insertion order, so two equivalent actions compare unequal as JSON when
+    their parameters were assigned in a different order. That occurs between
+    `generate_valid_actions` and any action constructed here. Comparing a sorted
+    tuple of parameters instead uses the parameter objects' own equality; `IP`,
+    `Network`, `Service` and `Data` are frozen and hashable, so the key can also
+    be used in a set.
     """
     return (action.type, tuple(sorted(action.parameters.items(), key=lambda item: item[0])))
 
 
 def action_sort_key(action: Action) -> str:
-    """Stable ordering key. Set iteration order is random; graphs are not."""
+    """A stable sort key. Set iteration order varies between processes."""
     action_type, parameters = action_key(action)
     return f"{action_type.name}|" + ";".join(f"{name}={value}" for name, value in parameters)
 
@@ -94,10 +91,10 @@ def canonicalize_exploits(actions: Iterable[Action]) -> List[Action]:
     so exploiting is treated as a host-level decision and the service is filled
     with the lexicographically smallest valid one.
 
-    This assumption is simulator-specific and does not hold in a real range,
-    where the service decides whether the exploit exists at all. It is kept here
-    so a policy trained in the simulator can be run unchanged, and flagged as a
-    known divergence rather than silently inherited.
+    The assumption is specific to the simulator and does not hold in a real
+    range, where the service determines whether an exploit exists. It is
+    retained so that a policy trained in the simulator runs unchanged, and is
+    documented here rather than left implicit.
     """
     reduced: List[Action] = []
     exploit_index: Dict[Tuple[object, object], int] = {}

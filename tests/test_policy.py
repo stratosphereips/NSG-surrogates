@@ -1,9 +1,9 @@
-"""Policy tests: legality of emitted actions, and checkpoint compatibility.
+"""Tests for action validity and for checkpoint compatibility.
 
-The compatibility test is the load-bearing one for the proof of concept: if the
-surrogate's `state_dict` diverges from `sgrl_netsec`'s `FactoredGNNPolicy`, then
-a checkpoint trained in the simulator cannot be run against real container
-state, and the whole "train in NSG, port to docker" plan needs a retraining step.
+The compatibility test matters for the comparison this repository is built to
+support: if the parameters of this policy diverge from
+`sgrl_netsec`'s `FactoredGNNPolicy`, a checkpoint from the simulator agent
+cannot be evaluated on projected container states without retraining.
 """
 
 import importlib.util

@@ -1,16 +1,14 @@
-"""Play the surrogate inside NetSecGame, against the real game server.
+"""Run the fitted policy as a NetSecGame agent against a game server.
 
-This is the return leg of the emulation -> simulation -> emulation loop. The
-surrogate is trained on states projected from a real container
-(`state_adapter`), and this module runs that same policy as an ordinary NSG
-agent over the coordinator's socket, exactly the way
-`sgrl_netsec/blackbox_pure_gnn_agent.py` does. Two things follow:
+The policy is fitted to states projected from an emulated container
+(`state_adapter`); this module runs it over the coordinator's socket in the same
+way as `sgrl_netsec/blackbox_pure_gnn_agent.py`. Two uses follow:
 
 * other agents can be trained in NetSecGame against a surrogate whose behaviour
-  came from a real operator, rather than against a hand-written baseline;
-* the surrogate can be *measured* — win rate, steps, reward — on the same
-  scenarios and with the same statistics as the simulator-native agents, which
-  is the only way to compare them.
+  derives from recorded activity rather than from a hand-written baseline;
+* the surrogate can be measured — win rate, episode length, reward — on the same
+  scenarios and with the same statistics as the simulator's own agents, which is
+  what makes the two comparable.
 
 `SurrogateController` holds everything that decides an action and needs no
 socket, so it can be tested without a running server. `SurrogateAgent` is the
@@ -47,20 +45,20 @@ from .encoder import state_summary, state_to_pyg
 from .policy import Decision, FactoredGNNPolicy, SurrogatePolicy
 from .state_adapter import Provenance
 
-#: Data entities the simulator emits in bulk and no policy should reason over.
+#: Data entities the simulator emits in quantity and that carry no information.
 NOISE_DATA_IDS = frozenset({"logfile"})
 
 
 def filter_noise_data(observation: Optional[Observation]) -> Optional[Observation]:
-    """Drop bulk `logfile` data entities from an observation.
+    """Remove `logfile` data entities from an observation.
 
-    The simulator hands out one of these per host per step, which inflates the
-    data node count and the `ExfiltrateData` branching factor without carrying
-    information. `sgrl_netsec` filters them in place; this returns a new
-    observation instead, so the caller's copy is never mutated underneath it.
+    The simulator produces one per host per step. They increase the data node
+    count and the number of exfiltration candidates without carrying
+    information. `sgrl_netsec` removes them in place; this returns a new
+    observation, so the caller's own copy is unchanged.
 
-    `None` passes through: `make_step` returns `None` when the server reply
-    carries no observation (error or timeout).
+    `None` is returned unchanged: `make_step` returns `None` when the server's
+    reply contains no observation, on error or timeout.
     """
     if observation is None:
         return None
@@ -86,7 +84,7 @@ def filter_noise_data(observation: Optional[Observation]) -> Optional[Observatio
 
 
 class SurrogateController:
-    """Everything needed to choose an action. No connection, no episode loop."""
+    """Action selection. Holds no connection and runs no episode loop."""
 
     def __init__(
         self,
@@ -151,7 +149,7 @@ class SurrogateController:
         return decision.action
 
     def state_value(self, observation: Observation) -> torch.Tensor:
-        """V(s) from the shared backbone, for anyone wiring this into RL."""
+        """Value estimate for the state, from the shared network body."""
         graph, _, _ = state_to_pyg(
             observation.state,
             attempt_counts=self.attempt_counts,
@@ -187,11 +185,11 @@ class EpisodeResult:
 
 @dataclass
 class EvalStats:
-    """Aggregate over episodes, in the same shape the simulator agent reports.
+    """Statistics over a set of episodes, in the simulator agent's format.
 
-    Spread travels with every mean: two runs with the same average length can
-    behave very differently, and a win rate from 10 episodes is not a
-    measurement without its standard error.
+    Every mean is accompanied by a measure of dispersion: two runs with the same
+    mean episode length can behave differently, and a win rate over ten episodes
+    is not interpretable without its standard error.
     """
 
     episodes: int = 0
@@ -256,7 +254,7 @@ def _proportion_se(proportion: float, count: int) -> float:
 
 
 def aggregate(results: List[EpisodeResult]) -> EvalStats:
-    """Summarise episode results. Separate from the loop so it is testable."""
+    """Summarise episode results. Separate from the loop so it can be tested."""
     stats = EvalStats(episodes=len(results))
     if not results:
         return stats
@@ -284,7 +282,7 @@ def aggregate(results: List[EpisodeResult]) -> EvalStats:
 
 
 class SurrogateAgent(BaseAgent):
-    """The surrogate as an NSG agent: connect, register, play episodes."""
+    """The surrogate as a NetSecGame agent: connect, register, play episodes."""
 
     def __init__(
         self,
@@ -317,7 +315,7 @@ class SurrogateAgent(BaseAgent):
 
         while observation and not observation.end:
             if self.max_steps is not None and result.steps >= self.max_steps:
-                # The server enforces its own limit; this is only a guard for
+                # The server enforces its own step limit. This is a guard for
                 # scenarios configured without one.
                 break
 
@@ -343,8 +341,8 @@ class SurrogateAgent(BaseAgent):
         """Play `episodes` episodes and aggregate. Requires a live server."""
         results: List[EpisodeResult] = []
         with torch.no_grad():
-            # The episode already on the server belongs to whatever ran before
-            # us, so start from a clean reset.
+            # The episode currently on the server belongs to whatever ran
+            # before this agent, so begin with a reset.
             observation = self.request_game_reset(request_trajectory=False)
             for index in range(1, episodes + 1):
                 result, observation = self.play_episode(observation, verbose=verbose)

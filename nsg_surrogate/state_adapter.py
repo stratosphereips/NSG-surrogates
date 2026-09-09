@@ -14,12 +14,11 @@ because in this direction the source graph is strictly richer than the target:
     program / command / user         (no target at all)
     confidence, evidence, inferred   (no target — collapsed to boolean fact)
 
-The projection never invents a fact: an entity that cannot be expressed honestly
-is dropped and recorded with a reason, following the same rule as
-`nsg-action-translator`'s `graph_projection`. Unlike that module it reads the
-full graph rather than `summary.json`, which keeps service ports, per-node
-confidence and host locality — all of which the encoder needs and the summary
-does not carry.
+The projection adds no facts. An entity that cannot be represented is discarded
+and recorded with the reason, and any choice the observation does not determine
+is reported as such. The full graph is read rather than `summary.json`, because
+the summary omits service ports, per-node confidence and host locality, which
+the encoder uses.
 """
 
 from __future__ import annotations
@@ -38,8 +37,8 @@ SUPPORTED_GRAPH_SCHEMAS = ("nsg-state-graph/1.1",)
 
 DEFAULT_AGENT_ID = "agent:observed"
 
-# Edge types that carry the agent's knowledge lens. NSG state is by definition
-# "what the agent knows", so these select the projectable subgraph.
+# Edge types that record what the agent knows. A NetSecGame state is defined as
+# the agent's knowledge, so these edges select the subgraph to project.
 KNOWLEDGE_EDGES = {
     "KNOWS_HOST": "host",
     "KNOWS_NETWORK": "network",
@@ -52,9 +51,9 @@ CONTROL_EDGE = "CONTROLS"
 # Node types with no representation anywhere in GameState.
 UNREPRESENTABLE_NODE_TYPES = frozenset({"program", "command", "user", "agent", "observation"})
 
-# Paths that are container/OS noise rather than agent-relevant data. The state
-# creator's own "important files" filter at strategic level overlaps with this;
-# the denylist stays because operational/forensic graphs do not apply it.
+# Paths that hold operating-system state rather than data an agent would target.
+# The state creator applies its own filter at the strategic level; this list is
+# retained because the operational and forensic levels do not.
 DEFAULT_DATA_PATH_DENYLIST: Tuple[str, ...] = (
     r"^/tmp/",
     r"^/var/tmp/",
@@ -71,12 +70,12 @@ DEFAULT_DATA_PATH_DENYLIST: Tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class AdapterConfig:
-    """Knobs that decide how much of the docker graph survives projection.
+    """Options that decide how much of the state graph is projected.
 
-    Every default is a judgement call the PoC exists to test, so each one is a
-    knob rather than a constant. Loosening `min_confidence` or clearing
-    `data_path_denylist` is the fastest way to see the projected action space
-    explode.
+    Every default encodes a judgement that the observation does not determine,
+    so each is an option rather than a constant. Lowering `min_confidence` or
+    clearing `data_path_denylist` shows how much of the projected action space
+    depends on those judgements.
     """
 
     #: Drop nodes the state creator is less sure about than this. Inferred
@@ -86,14 +85,14 @@ class AdapterConfig:
     include_inferred_networks: bool = False
     #: Networks that are routes, not attack surface.
     excluded_cidrs: FrozenSet[str] = frozenset({"0.0.0.0/0", "::/0"})
-    #: Statuses that mean a service node records *our own traffic* rather than
-    #: a service: a 1000-port `nmap -sS` leaves 999 nodes with
+    #: Statuses indicating that a service node records the agent's own traffic
+    #: rather than a service. A 1000-port `nmap -sS` produces 999 nodes with
     #: `status: "attempted"` (confidence 0.7, `zeek_state: S0`), attributed to
-    #: the scanning host. Projecting those fills NSG's known_services with the
-    #: agent's own scan. A node carrying positive evidence too
-    #: (`service_status_positive`) is kept, and a node with no status at all is
-    #: kept — a missing optional field is not grounds for dropping a fact.
-    #: Empty set disables the filter.
+    #: the scanning host; projecting them would populate `known_services` with
+    #: the agent's own scan. A node that also carries positive evidence
+    #: (`service_status_positive`) is kept, as is a node with no status at all,
+    #: since a missing optional field is not evidence of absence. An empty set
+    #: disables the filter.
     service_status_denylist: FrozenSet[str] = frozenset({"attempted", "targeted"})
     #: Statuses that are direct evidence a service exists; these override the
     #: denylist when a node carries both (`["listening", "attempted"]`).
@@ -105,25 +104,25 @@ class AdapterConfig:
     #: when the filesystem monitor never reconciled it. See `_data_is_present`.
     accept_command_argument_data: bool = True
     data_path_denylist: Tuple[str, ...] = DEFAULT_DATA_PATH_DENYLIST
-    #: Cap per host; NSG's ExfiltrateData action space is |data| x |controlled|.
+    #: Cap per host; NetSecGame's ExfiltrateData action space is |data| x |controlled|.
     max_data_per_host: int = 32
-    #: Networks that are in scope as targets. The state creator records every
-    #: host the container ever talked to, which in the sample run means Ubuntu
-    #: archive mirrors, Cloudflare and public DNS resolvers. NSG treats every
-    #: known host as attackable, so leaving this empty hands the policy a set of
-    #: third-party internet hosts to exploit. Set it for any live run.
+    #: Networks whose hosts are targets. The state creator records every host
+    #: the container contacted, which in the sample run includes Ubuntu archive
+    #: mirrors, Cloudflare and public resolvers. NetSecGame treats every known
+    #: host as attackable, so leaving this empty presents third-party internet
+    #: hosts to the policy as valid targets.
     scope_cidrs: FrozenSet[str] = frozenset()
-    #: Hosts that count as outside the range, i.e. legitimate exfiltration
-    #: destinations. Replaces the simulator's `is_private()` test, which is
-    #: meaningless in an all-RFC1918 docker range. Exempt from `scope_cidrs`.
+    #: Hosts outside the range, and therefore valid exfiltration destinations.
+    #: Replaces the simulator's `is_private()` test, which carries no
+    #: information in an all-RFC1918 container network. Exempt from
+    #: `scope_cidrs`.
     external_hosts: FrozenSet[str] = frozenset()
-    #: Add designated external hosts to `controlled_hosts`. The observed
-    #: container is the only host the state creator can report as controlled,
-    #: and NSG's `ExfiltrateData` needs a *second* controlled host as the
-    #: destination — so without this the exfiltration action, and therefore
-    #: every NSG scenario's win condition, is unreachable in the real range.
-    #: This is a declared operator fact (the attacker's own drop box), not an
-    #: inference from the observation, and is always reported as such.
+    #: Add declared external hosts to `controlled_hosts`. The observed container
+    #: is the only host the state creator can report as controlled, and
+    #: `ExfiltrateData` requires a second controlled host as the destination, so
+    #: without this the action is unreachable and no scenario goal can be met.
+    #: The addition is configuration rather than observation, and is always
+    #: recorded as such in the report.
     treat_external_as_controlled: bool = True
     #: Agent node whose knowledge edges define the projectable subgraph.
     agent_id: str = DEFAULT_AGENT_ID
@@ -131,7 +130,7 @@ class AdapterConfig:
 
 @dataclass(frozen=True)
 class Drop:
-    """One entity the projection refused to represent."""
+    """One entity the projection did not represent, and why."""
 
     category: str
     node_id: str
@@ -145,7 +144,7 @@ class Drop:
 
 @dataclass
 class AdapterReport:
-    """What the projection saw, produced, and had to throw away."""
+    """What the projection read, what it produced, and what it discarded."""
 
     schema_version: str = ""
     detail_level: str = ""
@@ -174,16 +173,16 @@ class AdapterReport:
 
 @dataclass
 class Provenance:
-    """Side channels the encoder and any debugger need after projection.
+    """Information the encoder needs that `GameState` cannot hold.
 
-    `GameState` cannot hold these, but throwing them away would either dumb the
-    policy down (ports, external hosts) or make a chosen action impossible to
-    trace back to the observation that justified it (`node_id`).
+    Discarding it would either remove signal from the policy (service ports,
+    external hosts) or make a selected action impossible to trace back to the
+    observation it came from (`node_id`).
     """
 
-    #: NSG object -> originating docker node id.
+    #: NetSecGame object -> originating docker node id.
     node_id: Dict[Any, str] = field(default_factory=dict)
-    #: (host, service) -> TCP/UDP port, which NSG's `Service` has no field for.
+    #: (host, service) -> TCP/UDP port, which NetSecGame's `Service` has no field for.
     service_ports: Dict[Tuple[IP, Service], int] = field(default_factory=dict)
     #: Hosts the state creator saw as the local container.
     local_hosts: Set[IP] = field(default_factory=set)
@@ -191,7 +190,7 @@ class Provenance:
     external_hosts: Set[IP] = field(default_factory=set)
     #: Per-node confidence, keyed the same way as `node_id`.
     confidence: Dict[Any, float] = field(default_factory=dict)
-    #: Every address the state creator attributed to a projected host. NSG
+    #: Every address the state creator attributed to a projected host. NetSecGame
     #: allows exactly one IP per host, so multi-homed containers lose the rest.
     host_addresses: Dict[IP, Tuple[str, ...]] = field(default_factory=dict)
     #: Block nodes verbatim; see `AdapterReport.notes` for why they are unmapped.
@@ -295,8 +294,9 @@ def project_graph_to_game_state(
             claimed_elsewhere=claimed_elsewhere,
         )
         if address is None:
-            # DNS-name hosts and IPv6-only hosts land here: NSG addresses hosts
-            # by IPv4 string only, so there is no honest projection.
+            # Hosts identified by DNS name and IPv6-only hosts reach this
+            # branch. NetSecGame addresses hosts by IPv4 string, so there is no
+            # representation for them.
             report.drops.append(Drop("host", node_id, "no routable IPv4 address", label))
             continue
 
@@ -326,10 +326,10 @@ def project_graph_to_game_state(
             )
         if claimed_elsewhere:
             # The same IP being both "me" and "a remote host" is not expressible
-            # in NSG: the surrogate could emit an action targeting itself.
+            # in NetSecGame: the surrogate could emit an action targeting itself.
             report.notes.append(
                 f"host {node_id} also claims {sorted(claimed_elsewhere)}, which other "
-                "host node(s) own; NSG cannot express the aliasing"
+                "host node(s) own; NetSecGame cannot express the aliasing"
             )
 
     if not config.scope_cidrs:
@@ -342,7 +342,7 @@ def project_graph_to_game_state(
             report.notes.append(
                 f"no scope_cidrs set and {len(off_range)} of {len(known_hosts)} projected hosts "
                 f"are public internet addresses ({', '.join(off_range[:4])}"
-                f"{', ...' if len(off_range) > 4 else ''}); NSG treats every known host as "
+                f"{', ...' if len(off_range) > 4 else ''}); NetSecGame treats every known host as "
                 "attackable, so declare a scope before any live run"
             )
 
@@ -365,7 +365,7 @@ def project_graph_to_game_state(
                 + " so ExfiltrateData has a destination; this is configuration, not observation"
             )
 
-    # NSG requires controlled_hosts to be a subset of known_hosts.
+    # NetSecGame requires controlled_hosts to be a subset of known_hosts.
     known_hosts |= controlled_hosts
     if len(controlled_hosts) < 2:
         report.notes.append(
@@ -374,7 +374,7 @@ def project_graph_to_game_state(
         )
     if not controlled_hosts:
         report.notes.append(
-            "no CONTROLS edge projected: without a controlled host the NSG action "
+            "no CONTROLS edge projected: without a controlled host the NetSecGame action "
             "space is empty, since every action needs a source_host"
         )
 
@@ -509,7 +509,7 @@ def project_graph_to_game_state(
     if blocks:
         report.notes.append(
             f"{len(blocks)} block node(s) not projected: they are attributed to a target "
-            "service with no observing source host, while NSG needs Dict[IP, Set[IP]]"
+            "service with no observing source host, while NetSecGame needs Dict[IP, Set[IP]]"
         )
 
     present_unrepresentable = sorted(
@@ -614,7 +614,7 @@ def _parsed_scope(config: AdapterConfig) -> Tuple[ipaddress.IPv4Network, ...]:
 
 
 def _in_scope(address: str, config: AdapterConfig) -> bool:
-    """Is this host a legitimate target, or merely something we talked to?"""
+    """Whether this host is a declared target rather than merely contacted."""
     if not config.scope_cidrs:
         return True
     if address in config.external_hosts:
@@ -641,11 +641,11 @@ def _member_networks(
 
 
 def _sole_address_owners(nodes_by_id: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
-    """Address -> the host node whose only routable address it is.
+    """Map each address to the host node whose only routable address it is.
 
-    A node with exactly one routable IPv4 *is* that address; when another,
-    multi-homed node also lists it (a container listing its bridge gateways),
-    the single-address node is the rightful owner.
+    A node with exactly one routable IPv4 address is identified by it. When a
+    multi-homed node also lists that address, as a container does for its bridge
+    gateways, the single-address node is its owner.
     """
     owners: Dict[str, str] = {}
     for node_id, node in sorted(nodes_by_id.items()):
@@ -668,7 +668,7 @@ def _status_set(status: Any) -> Set[str]:
 def _data_is_present(
     attributes: Dict[str, Any], accept_command_argument: bool = True
 ) -> Tuple[bool, str]:
-    """Decide whether a data node belongs in NSG's `known_data`.
+    """Decide whether a data node belongs in NetSecGame's `known_data`.
 
     The state creator reports existence two ways and neither is a plain boolean:
     `exists` is `true`, or `[true, false]` when the file was observed both
@@ -676,7 +676,7 @@ def _data_is_present(
     appears on nodes it could not reconcile.
 
     Filesystem confirmation is not the only evidence that matters, though.
-    NSG's `known_data` means *the agent has discovered this data*, and a file
+    NetSecGame's `known_data` means *the agent has discovered this data*, and a file
     named on the operator's command line proves exactly that — `/etc/passwd` in
     the strategic sample run arrives with `knowledge_source:
     "command-argument"`, `existence: "unknown"`, sourced from the TTY log,
@@ -735,9 +735,9 @@ def _canonical_ipv4(
     member_networks: Sequence[str] = (),
     claimed_elsewhere: FrozenSet[str] = frozenset(),
 ) -> Optional[str]:
-    """Pick the one address NSG will use to identify a host.
+    """Pick the one address NetSecGame will use to identify a host.
 
-    NSG identifies a host by a single IPv4 string, but the observed container is
+    NetSecGame identifies a host by a single IPv4 string, but the observed container is
     multi-homed: `host:local` in the sample run claims 127.0.0.1, 172.23.0.2,
     172.17.0.2, 172.17.0.1, 172.23.0.1, several link-local v6 addresses and a
     multicast address. Taking the numerically smallest routable one picks
@@ -792,10 +792,10 @@ def _projectable_network(cidr: str) -> Optional[ipaddress.IPv4Network]:
 
 
 def _service_name(attributes: Dict[str, Any]) -> str:
-    """Collapse `service_name` into NSG's single-string service name.
+    """Collapse `service_name` into NetSecGame's single-string service name.
 
     The state creator emits either a string or a list of aliases
-    (`["https", "ssl"]`). Stringifying a list produces a nonsense NSG service
+    (`["https", "ssl"]`). Stringifying a list produces a nonsense NetSecGame service
     name, so pick the first alias and keep the ordering deterministic.
     """
     raw = attributes.get("service_name")

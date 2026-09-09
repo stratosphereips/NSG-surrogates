@@ -1,8 +1,8 @@
-"""Golden tests for the docker -> NetSecGame state projection.
+"""Tests for the projection from a state graph to a NetSecGame `GameState`.
 
-Written as `unittest.TestCase` deliberately: these run with the standard library
-alone (`python3 -m unittest discover tests`), so the mapping half of the PoC is
-testable before torch is installed, and pytest still collects them unchanged.
+Written as `unittest.TestCase` so that they run with the standard library alone
+(`python -m unittest discover -s tests`), which means the projection can be
+tested without torch installed. pytest collects them unchanged.
 """
 
 import json

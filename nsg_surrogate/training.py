@@ -1,26 +1,26 @@
-"""Supervised training of the surrogate on labelled (state, action) pairs.
+"""Fit the policy to labelled (state, action) pairs by supervised learning.
 
-Behaviour cloning over the four factored heads: each head gets a masked
-cross-entropy against the index `factorization.head_targets` says it should have
-produced, with the true prefix as conditioning (teacher forcing, see
-`FactoredGNNPolicy.head_logits`).
+Each of the four heads receives a cross-entropy loss against the index that
+`factorization.head_targets` determines it should have produced, masked to the
+candidates available at that step. Each head is conditioned on the correct
+earlier choices rather than on its own (teacher forcing; see
+`FactoredGNNPolicy.head_logits`), so no head is trained to compensate for an
+earlier head's error.
 
-Two properties matter more than the loss curve at this data scale:
+Two properties of the procedure matter as much as the loss:
 
-* **Samples are re-projected from the copied state graphs, not from
-  `projection_cache`.** The graph is the dataset's source of truth, so a change
-  to the adapter changes what is trained on — which is the point of storing
-  graphs. The cached projection is only compared against, and a mismatch is
-  reported rather than ignored.
-* **Splits are by run, never by row.** Rows from one transition share a state,
-  and several rows can share a state across transitions, so a row-level split
-  leaks the evaluation states into training and reports an accuracy that means
-  nothing.
+* **Samples are re-projected from the copied state graphs**, not read from
+  `projection_cache`. The graph is the dataset's authoritative content, so a
+  change to the projection changes the training data. The cached projection is
+  used only for comparison, and a difference is reported.
+* **Data is split by run, not by row.** Several rows can refer to the same
+  state, so a row-level split would place the same state in both parts and the
+  reported accuracy would not measure generalisation.
 
-The trainer is deliberately honest about scale: it reports the majority-class
-baseline next to accuracy, because with tens of examples over three action types
-a constant predictor is a strong competitor and any number that fails to beat it
-is noise.
+Two reference values are reported alongside accuracy, because accuracy alone is
+not interpretable at this sample size: the accuracy of always predicting the
+most frequent action type, and the highest accuracy any function of the
+encoder's input could reach given the labels (see `deterministic_ceiling`).
 """
 
 from __future__ import annotations
@@ -184,15 +184,14 @@ def load_samples(
 
 
 def _replay_attempt_counts(samples: List[Sample]) -> List[Sample]:
-    """Attach per-run interaction history, in trajectory order.
+    """Attach each run's interaction history, in recorded order.
 
-    Without this, the encoder sees the same feature vector for the first and the
-    fifth `FindData` on a host, so identical inputs carry different labels and no
-    deterministic policy can fit them — on the real runs, 21 samples collapse to
-    8 distinct state contents and the achievable accuracy caps at 15/21. The
-    attempt counters exist exactly to break that tie (they were added upstream to
-    escape Markov-identical loops), so the loader replays each run in order and
-    snapshots the counts as of each step.
+    Without it the encoder produces the same input for the first and the fifth
+    `FindData` on a host, so identical inputs carry different labels and no
+    function of the input can fit them. On the two real runs, 21 samples reduce
+    to 8 distinct inputs and the highest achievable accuracy is 15/21. The
+    attempt counters exist to distinguish these cases, so the loader replays
+    each run in order and records the counts as of each step.
     """
     ordered: List[Sample] = []
     for run_id in sorted({sample.run_id for sample in samples}):
@@ -230,11 +229,12 @@ def _object_to_idx(projection: Projection) -> Dict[str, dict]:
 def split_by_run(
     samples: Sequence[Sample], holdout_runs: Sequence[str] = ()
 ) -> Tuple[List[Sample], List[Sample]]:
-    """Train/eval split at run granularity.
+    """Split samples into training and evaluation parts, by run.
 
-    With no holdout named, everything is training data and evaluation is
-    in-sample — which is the honest situation for two runs of one operator, and
-    is reported as such rather than faked with a row-level split.
+    With no run named, every sample is training data and the evaluation is
+    therefore on the training set. That is reported as such rather than
+    approximated with a row-level split, which would place the same state in
+    both parts.
     """
     if not holdout_runs:
         return list(samples), []
@@ -258,7 +258,7 @@ def _encode(sample: Sample):
 def head_losses(
     policy: FactoredGNNPolicy, sample: Sample
 ) -> Dict[str, torch.Tensor]:
-    """Per-head cross-entropy for one sample."""
+    """Cross-entropy loss for each active head of one sample."""
     graph, object_to_idx, summary = _encode(sample)
     logits = policy.head_logits(
         graph, object_to_idx, sample.candidates, sample.targets, summary=summary
@@ -276,8 +276,8 @@ def head_losses(
             continue
         head_logit = logits[head]
         if head_logit.numel() <= 1:
-            # A head with a single candidate carries no information; training on
-            # it only pushes logits around without changing any decision.
+            # A head with one candidate conveys no information: its output is
+            # determined, so a loss on it cannot change any selection.
             continue
         losses[head] = F.cross_entropy(
             head_logit.unsqueeze(0), torch.tensor([index], device=head_logit.device)
@@ -313,7 +313,7 @@ class EvalResult:
 
 @torch.no_grad()
 def evaluate(policy: FactoredGNNPolicy, samples: Sequence[Sample]) -> EvalResult:
-    """Greedy decode every sample and compare against its label."""
+    """Select an action greedily for every sample and compare with its label."""
     result = EvalResult(samples=len(samples))
     if not samples:
         return result
@@ -372,13 +372,13 @@ def evaluate(policy: FactoredGNNPolicy, samples: Sequence[Sample]) -> EvalResult
 
 
 def deterministic_ceiling(samples: Sequence[Sample]) -> Tuple[float, int]:
-    """Best accuracy any state -> action function can reach on these samples.
+    """The highest accuracy any function of the encoder's input can reach.
 
-    Groups by what the encoder actually sees — the projected state *and* the
-    attempt-count snapshot — and credits the most frequent label per group.
-    Identical inputs carrying different labels are unfittable by construction, so
-    an accuracy at the ceiling means the model has learned everything available
-    and the remainder is label conflict, not underfitting.
+    Samples are grouped by what the encoder receives — the projected state and
+    the attempt counts — and only the most frequent label in each group is
+    counted as reachable. Identical inputs with different labels cannot both be
+    satisfied, so accuracy equal to this value means the remaining errors are
+    contradictory labels rather than underfitting.
     """
     if not samples:
         return 1.0, 0
@@ -392,7 +392,7 @@ def deterministic_ceiling(samples: Sequence[Sample]) -> Tuple[float, int]:
 
 
 def _input_key(sample: Sample) -> str:
-    """Everything the encoder derives its features from."""
+    """The inputs the encoder derives its features from, as a hashable key."""
     counts = sample.attempt_counts
     history = (
         json.dumps(
@@ -445,9 +445,9 @@ def train(
 ) -> TrainResult:
     """Fit the four heads by masked cross-entropy.
 
-    Samples are processed one at a time: every state has a different graph and a
-    different candidate count, so there is nothing to batch without padding
-    machinery that this data volume does not justify.
+    Samples are processed individually. Each state has a different graph and a
+    different number of candidates, so batching would require padding machinery
+    that this quantity of data does not justify.
     """
     torch.manual_seed(seed)
     random.seed(seed)

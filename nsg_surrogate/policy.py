@@ -1,15 +1,15 @@
-"""The surrogate policy: hetero graph in, one parameterized NSG action out.
+"""The policy: graph tensors in, one parameterised NetSecGame action out.
 
-`FactoredGNNPolicy` is architecturally identical to
-`sgrl_netsec/blackbox_pure_gnn_agent.py:FactoredGNNPolicy` — same module names,
-shapes and head inputs — so `best_blackbox_gnn.pth` loads into it unchanged.
-That is deliberate: the PoC's question is whether a policy trained in the
-simulator can act on real container state, which is only answerable if the
-weights transfer without surgery.
+`FactoredGNNPolicy` has the same submodule names, parameter shapes and head
+inputs as `sgrl_netsec/blackbox_pure_gnn_agent.py:FactoredGNNPolicy`, so a
+checkpoint from that agent loads here unmodified. This is intentional: comparing
+a policy fitted to emulation data with one trained in the simulator requires
+that parameters transfer between them without conversion.
+`tests/test_policy.py` asserts the equivalence.
 
-`SurrogatePolicy` wraps it with the pieces the real range needs: episode-local
-attempt counters, the state adapter's provenance, and a `Decision` that records
-what each head chose so an emitted action can be explained.
+`SurrogatePolicy` adds what is needed outside the simulator: per-episode attempt
+counters, the projection's `Provenance`, and a `Decision` record of what each
+head selected, so that a chosen action can be explained after the fact.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from .state_adapter import Provenance
 
 @dataclass
 class Decision:
-    """One action plus the trace of how the four heads reached it."""
+    """One selected action, with the choice each of the four heads made."""
 
     action: Action
     head_choices: Dict[str, str] = field(default_factory=dict)
@@ -66,16 +66,17 @@ class Decision:
 
 
 class FactoredGNNPolicy(nn.Module):
-    """GATv2 backbone plus four sequential, candidate-masked decision heads.
+    """A GATv2 network body with four sequential, candidate-masked heads.
 
-      type_head : pooled graph ‖ summary          -> action type   (5-way)
-      src_head  : host ‖ pooled ‖ type            -> source host
-      tgt_head  : node ‖ pooled ‖ type ‖ src      -> primary target
-      sec_head  : node ‖ pooled ‖ type ‖ src ‖ tgt-> secondary (ExfiltrateData)
+      type_head : pooled graph ‖ summary           -> action type (5 classes)
+      src_head  : host ‖ pooled ‖ type             -> source host
+      tgt_head  : node ‖ pooled ‖ type ‖ src       -> primary target
+      sec_head  : node ‖ pooled ‖ type ‖ src ‖ tgt -> secondary parameter
 
-    Each head is masked to the candidate set, so every sampled action is legal
-    by construction. Because the heads run in sequence, each conditioned on the
-    previous choices, the joint log-probability is the exact sum of the four.
+    Each head is masked to the candidates available at that step, so every
+    selected action is valid by construction. The heads run in sequence, each
+    conditioned on the previous choices, so the joint log-probability of an
+    action is the sum of the four terms.
     """
 
     NUM_STATE_SUMMARY = 3
@@ -137,6 +138,7 @@ class FactoredGNNPolicy(nn.Module):
         )
 
     def state_value(self, data, summary: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Value estimate for a state, from the shared network body."""
         device = next(self.parameters()).device
         pooled = self._global_emb(self._gnn_forward(data), device)
         if summary is None:
@@ -153,15 +155,15 @@ class FactoredGNNPolicy(nn.Module):
         targets: HeadTargets,
         summary: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Logits for every active head, conditioned on the *true* prefix.
+        """Logits for every active head, conditioned on the correct prefix.
 
-        Teacher forcing. At inference each head is conditioned on what the
-        previous heads sampled; during supervised training it must be
-        conditioned on what they *should* have chosen, or the later heads learn
-        to correct the earlier ones' mistakes instead of learning their own job.
+        This is teacher forcing. When selecting an action, each head is
+        conditioned on what the previous heads chose; during supervised training
+        it is conditioned on what they should have chosen, so that a later head
+        is not trained to compensate for an earlier head's error.
 
-        Candidate lists come from `factorization`, the same code the decoder
-        uses, so index `i` means the same object in both directions.
+        Candidate lists come from `factorization`, which action selection also
+        uses, so index `i` denotes the same object in both directions.
         """
         device = next(self.parameters()).device
         zero = torch.zeros(self.hidden_channels, device=device)
@@ -252,11 +254,11 @@ class FactoredGNNPolicy(nn.Module):
         summary: Optional[torch.Tensor] = None,
         greedy: bool = False,
     ) -> Decision:
-        """Sample one action, recording each head's choice.
+        """Select one action, recording each head's choice.
 
-        `greedy` takes each head's argmax instead of sampling, which is what
-        evaluation wants: accuracy against a labelled action is meaningless if
-        the same state yields a different action on every call.
+        With `greedy`, each head takes its argmax instead of sampling. This is
+        what evaluation requires: accuracy against a labelled action is not
+        defined if the same state yields a different action on each call.
         """
         device = next(self.parameters()).device
         zero = torch.zeros(self.hidden_channels, device=device)
@@ -272,9 +274,9 @@ class FactoredGNNPolicy(nn.Module):
             return logits.argmax() if greedy else distribution.sample()
 
         def fallback(reason: str) -> Decision:
-            # The factorization cannot express the candidate set. Act, but emit
-            # no gradient-bearing terms and say so, rather than silently
-            # pretending the heads made this choice.
+            # The factorisation cannot express this candidate set. Select
+            # uniformly, report the reason, and return no log-probability, so
+            # that the choice is not attributed to the heads.
             choices["fallback_reason"] = reason
             return Decision(
                 action=random.choice(valid_actions),
@@ -400,7 +402,7 @@ class FactoredGNNPolicy(nn.Module):
         temperature: float = 1.0,
         state_summary: Optional[torch.Tensor] = None,
     ) -> Tuple[Action, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Signature-compatible with the simulator agent's policy call."""
+        """Same call signature as the simulator agent's policy."""
         decision = self.decide(
             data, object_to_idx, valid_actions, temperature=temperature, summary=state_summary
         )
@@ -415,7 +417,7 @@ class FactoredGNNPolicy(nn.Module):
 
 
 class SurrogatePolicy:
-    """Stateful wrapper: keeps attempt counters and does the encoding."""
+    """Holds the attempt counters and performs the encoding for each call."""
 
     def __init__(
         self,
@@ -435,8 +437,9 @@ class SurrogatePolicy:
     ) -> "SurrogatePolicy":
         """Load a checkpoint, or return a randomly initialised policy.
 
-        A random policy is useful on purpose: it exercises the whole
-        state -> graph -> action path without claiming the choices are good.
+        A randomly initialised policy is a useful control: it exercises the
+        whole path from state to action, and its action distribution is the
+        baseline a fitted policy is compared against.
         """
         surrogate = cls(legacy_service_port=legacy_service_port)
         if weights:

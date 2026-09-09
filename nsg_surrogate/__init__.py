@@ -1,15 +1,30 @@
-"""Surrogate agent: dockerized-environment state graph in, NetSecGame action out.
+"""Surrogate agents fitted to behaviour recorded in an emulated container.
 
-The package is deliberately split so that the mapping half runs without torch:
+The package is split so that the projection and labelling stages do not import
+torch and can run wherever `netsecgame` is importable:
 
-    state_adapter   NSG-state-creator graph.json  ->  netsecgame GameState
-    candidates      GameState                     ->  valid parameterized actions
-    encoder         GameState (+ counters)        ->  PyG HeteroData      (needs torch)
-    policy          HeteroData + candidates       ->  one Action          (needs torch)
+    state_adapter   state graph                -> netsecgame GameState
+    candidates      GameState                  -> valid actions
+    state_diff      two GameStates             -> change in NetSecGame terms
+    labeling        change + recorded commands -> NetSecGame action
+    dataset         a trajectory               -> labelled (state, action) rows
 
-`nsg_surrogate.cli inspect` exercises the first two on a real observation
-directory and reports what the mapping loses; that report is the point of the
-proof of concept.
+    encoder         GameState                  -> graph tensors   (needs torch)
+    policy          graph tensors + candidates -> one action      (needs torch)
+    training        labelled rows              -> fitted policy   (needs torch)
+    nsg_agent       fitted policy              -> episodes against the game server
+
+`python -m nsg_surrogate inspect` runs the projection alone and reports which
+observed entities it kept, which it discarded, and why.
 """
 
-__all__ = ["state_adapter", "candidates"]
+__all__ = [
+    "action_schema",
+    "attempt_counts",
+    "candidates",
+    "dataset",
+    "factorization",
+    "labeling",
+    "state_adapter",
+    "state_diff",
+]

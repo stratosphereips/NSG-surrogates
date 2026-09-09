@@ -1,8 +1,9 @@
-"""Tests for the factored targets and the training pipeline.
+"""Tests for target construction and for the training procedure.
 
-The round-trip tests are the load-bearing ones: if `head_targets` and the
-decoder disagree about what index `i` means, training silently optimises the
-wrong thing and no loss curve would show it.
+The round-trip tests are the important ones: if `head_targets` and action
+selection disagree about which object index `i` denotes, training optimises
+targets that correspond to different actions, and the loss gives no indication
+of it.
 """
 
 import importlib.util

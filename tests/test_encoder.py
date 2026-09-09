@@ -1,4 +1,4 @@
-"""Feature-layout tests for the state encoder. Requires torch."""
+"""Tests for the encoder's feature layout and node ordering. Requires torch."""
 
 import importlib.util
 import json
@@ -56,7 +56,7 @@ class EncoderTests(unittest.TestCase):
         self.assertEqual(features[gateway_idx][0].item(), 0.0, "gateway is not controlled")
 
     def test_service_port_feature_is_populated_from_provenance(self):
-        """The simulator's parse of `Service.name` leaves this feature dead."""
+        """The simulator's conversion of `Service.name` leaves this feature zero."""
         ports = sorted(feature[0].item() for feature in self.graph["service"].x)
         for actual, expected in zip(ports, [22 / 65535.0, 443 / 65535.0]):
             self.assertAlmostEqual(actual, expected, places=6)
@@ -67,7 +67,7 @@ class EncoderTests(unittest.TestCase):
         self.assertEqual(
             [feature[0].item() for feature in legacy_graph["service"].x],
             [0.0, 0.0],
-            "legacy mode must reproduce the simulator's silently-zero port feature",
+            "legacy mode must reproduce the simulator's always-zero port feature",
         )
 
     def test_attempt_counters_land_in_the_documented_slots(self):

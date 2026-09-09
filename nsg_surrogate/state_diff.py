@@ -1,14 +1,15 @@
-"""NetSecGame-level diff between two projected states.
+"""The difference between two projected states, in NetSecGame's own categories.
 
-The state creator computes its own delta on the *docker* graph. That delta is
-evidence, but it is not the right primary signal for labelling: after scoping,
-confidence thresholds and data filtering, a docker-side change may be invisible
-in the projected `GameState`, and vice versa. What decides whether real
-behaviour is expressible as an NSG action is the change in NSG's own six
-categories, so that is what this module computes.
+The state creator computes a delta over the recorded graph. That delta is useful
+as evidence, but it is not the right basis for labelling: after scoping,
+confidence thresholds and data filtering, a change in the recorded graph may not
+appear in the projected `GameState`, and a change in the projection may not
+correspond to a single recorded change. Whether observed behaviour is
+expressible as a NetSecGame action depends on the change in NetSecGame's six
+knowledge categories, which is what this module computes.
 
-Each field maps onto exactly one attacker action type, which is what makes
-effect-based labelling possible at all:
+Each field corresponds to exactly one attacker action type, which is what makes
+effect-based labelling possible:
 
     new_networks / new_hosts   ScanNetwork
     new_services               FindServices
@@ -87,12 +88,12 @@ class StateDiff:
 
 
 def diff_states(before: GameState, after: GameState) -> StateDiff:
-    """Compute the NSG-level diff. Additive only: NSG knowledge never shrinks.
+    """Compute the difference. Additions only: NetSecGame knowledge is monotonic.
 
-    Losses do happen on the docker side (a file is deleted, a host stops
-    answering), but NSG has no action that *removes* knowledge, so a shrinking
-    category cannot be labelled and is deliberately not reported here. The
-    dataset builder records those separately as unmappable transitions.
+    The recorded graph does lose facts — a file is deleted, a host stops
+    responding — but no NetSecGame action reduces a state, so a decrease cannot
+    be labelled and is not reported here. `lost_knowledge` measures those
+    separately.
     """
     new_services: Dict[IP, FrozenSet[object]] = {}
     for host, services in after.known_services.items():
@@ -139,7 +140,7 @@ def diff_states(before: GameState, after: GameState) -> StateDiff:
 
 
 def lost_knowledge(before: GameState, after: GameState) -> Dict[str, int]:
-    """Categories that shrank. No NSG action can produce these."""
+    """Categories that decreased. No NetSecGame action can produce a decrease."""
     lost_services = sum(
         len(set(services) - set(after.known_services.get(host, set())))
         for host, services in before.known_services.items()

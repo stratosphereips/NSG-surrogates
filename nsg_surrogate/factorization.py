@@ -1,18 +1,20 @@
-"""Shared candidate enumeration for the four factored heads.
+"""Per-head candidate lists, shared by action selection and target construction.
 
-Both directions of the policy need the *same* per-head candidate lists:
+Two operations need the same lists:
 
-* inference narrows the candidate set head by head and samples an index;
-* training has to convert a labelled action back into the index each head
-  should have produced.
+* selecting an action narrows the candidate set head by head and samples an
+  index from each;
+* constructing a training target converts a labelled action back into the index
+  each head should have produced.
 
-If those two enumerations ever disagree — a different iteration order, a
-different filter — training optimises indices that mean something else at
-inference time, and nothing about the loss curve would reveal it. So the lists
-are built here once and used by both.
+If the two enumerations differed in iteration order or in filtering, training
+would optimise indices that correspond to different actions at selection time,
+and the loss would give no indication of it. The lists are therefore built once,
+here, and used by both.
 
 Node iteration follows `object_to_idx`, whose insertion order is the sorted
-order `state_to_pyg` builds, which keeps candidate indices stable across calls.
+order that `state_to_pyg` produces, so candidate indices are stable across
+calls.
 """
 
 from __future__ import annotations

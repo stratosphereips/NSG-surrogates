@@ -1,4 +1,4 @@
-"""Tests for NSG-level diffing and effect/command labelling."""
+"""Tests for state differencing and for effect- and command-based labelling."""
 
 import unittest
 
@@ -167,7 +167,7 @@ class EffectLabelTests(unittest.TestCase):
 
 
 class UnmappableTests(unittest.TestCase):
-    """Each category names a NetSecGame capability that does not exist."""
+    """Each category names a capability NetSecGame does not have."""
 
     def categories(self, before, after, **kwargs):
         result = label_transition(
@@ -206,7 +206,7 @@ class UnmappableTests(unittest.TestCase):
             parse_command({"command": {"argv": ["apt-get", "install", "vim"], "executable": "apt-get"}})
         ]
         found, _ = self.categories(state, state, commands=commands)
-        self.assertIn("command outside the NSG action vocabulary", found)
+        self.assertIn("command outside the NetSecGame action vocabulary", found)
 
     def test_no_controlled_host_at_all(self):
         empty = GameState(known_networks={NET})
@@ -217,7 +217,7 @@ class UnmappableTests(unittest.TestCase):
 
 class CommandOnlyLabelTests(unittest.TestCase):
     def test_local_read_is_attributed_to_the_acting_host(self):
-        """`cat` on the container must not be attributed to the drop box."""
+        """`cat` on the container must not be attributed to the external host."""
         state = base_state(
             controlled_hosts={LOCAL, DROP_BOX}, known_hosts={LOCAL, DROP_BOX}
         )
@@ -383,17 +383,18 @@ class CandidateGateTests(unittest.TestCase):
 
 
 class TranslatorRoundTripTests(unittest.TestCase):
-    """The forward and inverse command mappings must agree where they overlap.
+    """The two command mappings must agree where they overlap.
 
-    `nsg-action-translator` owns the forward direction (NSG action -> CommandPlan
-    -> argv); this repo owns the inverse (argv + effect -> NSG action). If the
-    inverse cannot recover the action type from the exact argv the translator
-    emits, then a trajectory recorded while an NSG agent was driving the range
-    would be unlabelable — the two halves of the loop would disagree.
+    `nsg-action-translator` implements the forward direction, from a NetSecGame
+    action to a command; this repository implements the inverse. If the inverse
+    cannot recover the action type from the exact arguments the translator
+    produces, a trajectory recorded while a NetSecGame agent drove the range
+    could not be labelled.
 
-    argv shapes are copied from
-    `nsg_action_translator/actions/translator.py:67-83` rather than imported, to
-    keep the test independent of that repo's layout. Update them if it changes.
+    The argument lists are copied from
+    `nsg_action_translator/actions/translator.py:67-83` rather than imported, so
+    that the test does not depend on that repository's layout. They need
+    updating if it changes.
     """
 
     def recovered_type(self, argv):

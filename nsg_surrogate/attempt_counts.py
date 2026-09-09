@@ -1,14 +1,14 @@
-"""Per-episode, per-action attempt counters.
+"""Counts of attempted actions within one episode, per target.
 
-Lifted unchanged in behaviour from `sgrl_netsec/attempt_counts.py` so that the
-node-feature layout a simulator-trained checkpoint expects is reproduced
-exactly. The counts belong to the agent's interaction history, not to the
-environment, so the surrogate owns them rather than the state adapter.
+Behaviour matches `sgrl_netsec/attempt_counts.py`, so the node features a
+simulator-trained checkpoint expects are reproduced exactly. The counts describe
+the agent's own interaction history rather than the environment, so they are held
+by the agent and passed to the encoder rather than derived from the state.
 
-In the real range there is one wrinkle: the state creator's graph is rebuilt on
-a timer, not per action, so a surrogate step is not guaranteed to be followed by
-a fresh state. `record()` is therefore the only reliable record that an action
-was attempted at all.
+They matter more in the emulated range than in the simulator. The state graph is
+rebuilt on a timer rather than after each action, so an action is not guaranteed
+to be followed by a state that reflects it; `record()` is then the only evidence
+that the action was attempted.
 """
 
 from dataclasses import dataclass, field

@@ -1,23 +1,25 @@
-"""Turn an observed state transition into NetSecGame action labels.
+"""Assign a NetSecGame action to an observed state transition.
 
-Two signals, in the order they are trusted:
+Two sources of evidence are used, in this order of precedence:
 
-1. **Effect** — the NSG-level `StateDiff` between the projected states. Each of
-   NSG's six knowledge categories can only be grown by one action type, so the
-   diff yields both the type and (mostly) the parameters. This is primary
-   because it is indifferent to *how* the operator did it: `nmap`, `masscan` or
-   a hand-rolled loop all leave the same footprint.
-2. **Command** — the `command.argv` on the action records attributed to the
-   transition. Used to corroborate an effect label, to recover the two things a
-   diff cannot see (which service was exploited, and who acted), and to label
-   actions that changed nothing at all.
+1. **Effect** — the `StateDiff` between the two projected states. Each of
+   NetSecGame's six knowledge categories can be increased by exactly one action
+   type, so the difference determines the action type and most of its
+   parameters. This evidence is preferred because it does not depend on which
+   tool the operator used: `nmap`, `masscan` and a shell loop produce the same
+   change.
+2. **Command** — the `command.argv` of the action records attributed to the
+   transition. It confirms an effect-derived label, supplies the two parameters
+   the difference cannot determine (which service was exploited, and which host
+   acted), and labels actions that produced no observable change.
 
-A label is only emitted if the action is in the candidate set of the *before*
-state. An action the factored policy could never emit is not training data.
+A label is emitted only if the action belongs to the candidate set of the
+before-state. An action the policy could not select is not usable as a training
+target.
 
-Everything that cannot be labelled is categorised rather than dropped: those
-categories are the concrete argument for extending NetSecGame's action
-vocabulary, so they are the module's second output alongside the labels.
+Transitions that cannot be labelled are categorised rather than discarded. Each
+category names a capability NetSecGame would need in order to represent the
+observed behaviour, so the categories are the module's second output.
 """
 
 from __future__ import annotations
@@ -35,9 +37,10 @@ from .candidates import action_key, contains, enumerate_actions
 from .state_adapter import Provenance
 from .state_diff import StateDiff
 
-#: Executable -> the NSG action type its use implies. Matched on the command's
-#: basename; unlisted executables are off-vocabulary, which is a finding, not a
-#: failure. Deliberately conservative: a wrong corroboration is worse than none.
+#: Executable name to the action type its use implies, matched on the basename.
+#: An executable that is not listed is recorded as outside the vocabulary, which
+#: is a result rather than an error. The lists are deliberately narrow: a wrong
+#: confirmation is worse than no confirmation.
 COMMAND_RULES: Dict[ActionType, Tuple[str, ...]] = {
     ActionType.ScanNetwork: ("nmap", "masscan", "fping", "ping", "arp-scan", "netdiscover", "zmap"),
     ActionType.FindServices: ("nmap", "nc", "ncat", "netcat", "telnet", "nikto", "whatweb", "curl", "wget"),
@@ -60,7 +63,7 @@ _IPV4 = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
 @dataclass(frozen=True)
 class Label:
-    """One NSG action attributed to an observed transition."""
+    """One NetSecGame action attributed to an observed transition."""
 
     action: Action
     label_source: str  # effect | effect+command | command
@@ -81,10 +84,10 @@ class Label:
 
 @dataclass(frozen=True)
 class Unmappable:
-    """An observed change or command with no NetSecGame expression.
+    """An observed change or command with no NetSecGame representation.
 
-    `category` is the extension request: each distinct value names a capability
-    NSG would need in order to represent what the operator actually did.
+    Each distinct `category` names a capability NetSecGame would need in order to
+    express what was observed.
     """
 
     category: str
@@ -217,7 +220,7 @@ def label_transition(
         result.unmappable.append(
             Unmappable(
                 "no controlled source host",
-                "every NSG action needs a source_host, and none was projected",
+                "every NetSecGame action needs a source_host, and none was projected",
                 evidence_base,
             )
         )
@@ -265,7 +268,7 @@ def label_transition(
             result.unmappable.append(
                 Unmappable(
                     "host discovered outside any known network",
-                    f"{host} became known, but NSG can only learn hosts by scanning a "
+                    f"{host} became known, but NetSecGame can only learn hosts by scanning a "
                     "known network — there is no action for learning a host from a DNS "
                     "lookup, a log file, or an outbound connection",
                     dict(evidence_base, host=str(host)),
@@ -283,7 +286,7 @@ def label_transition(
         result.unmappable.append(
             Unmappable(
                 "network learned without a scan",
-                f"{network} became known; NSG has no action that discovers a network "
+                f"{network} became known; NetSecGame has no action that discovers a network "
                 "(they come from the scenario's starting knowledge)",
                 dict(evidence_base, network=str(network)),
             )
@@ -296,7 +299,7 @@ def label_transition(
                 Unmappable(
                     "services learned on a previously unknown host",
                     f"services appeared on {host} in the same transition in which the host "
-                    "itself became known; NSG requires the host to be known first",
+                    "itself became known; NetSecGame requires the host to be known first",
                     dict(evidence_base, host=str(host), services=[str(s) for s in services]),
                 )
             )
@@ -315,7 +318,7 @@ def label_transition(
             result.unmappable.append(
                 Unmappable(
                     "control gained without prior service knowledge",
-                    f"{host} became controlled with no service known on it beforehand; NSG's "
+                    f"{host} became controlled with no service known on it beforehand; NetSecGame's "
                     "ExploitService requires a known service, so credential reuse, key-based "
                     "login and lateral movement have no representation",
                     dict(evidence_base, host=str(host)),
@@ -343,7 +346,7 @@ def label_transition(
             result.unmappable.append(
                 Unmappable(
                     "data learned on an uncontrolled host",
-                    f"data appeared on {host}, which the agent does not control; NSG's FindData "
+                    f"data appeared on {host}, which the agent does not control; NetSecGame's FindData "
                     "only enumerates data on controlled hosts, so reading a remote page, an "
                     "open share or a banner has no representation",
                     dict(evidence_base, host=str(host), data=sorted(item.id for item in items)),
@@ -363,7 +366,7 @@ def label_transition(
             result.unmappable.append(
                 Unmappable(
                     "data copied to an uncontrolled host",
-                    f"{item.id} appeared on {destination}, which is not controlled; NSG's "
+                    f"{item.id} appeared on {destination}, which is not controlled; NetSecGame's "
                     "ExfiltrateData requires a controlled destination",
                     dict(evidence_base, data=item.id, destination=str(destination)),
                 )
@@ -372,12 +375,12 @@ def label_transition(
         if origin not in before.controlled_hosts:
             # Knowing where data sits is not being able to take it: the game
             # refuses exfiltration from a host the agent does not control, so
-            # whatever really happened here had access NSG cannot represent.
+            # whatever really happened here had access NetSecGame cannot represent.
             result.unmappable.append(
                 Unmappable(
                     "data moved from an uncontrolled host",
                     f"{item.id} moved from {origin} to {destination}, but the agent does not "
-                    f"control {origin}; NSG cannot exfiltrate from a host it has only learned "
+                    f"control {origin}; NetSecGame cannot exfiltrate from a host it has only learned "
                     "about, so the access that made this possible is unrepresented",
                     dict(evidence_base, data=item.id, origin=str(origin)),
                 )
@@ -398,7 +401,7 @@ def label_transition(
         result.unmappable.append(
             Unmappable(
                 "firewall knowledge gained",
-                f"{host} learned it is blocked from {sorted(str(b) for b in blocked)}; NSG only "
+                f"{host} learned it is blocked from {sorted(str(b) for b in blocked)}; NetSecGame only "
                 "produces known_blocks through the defender's BlockIP action",
                 dict(evidence_base, host=str(host)),
             )
@@ -426,7 +429,7 @@ def label_transition(
                 if not facts.action_types:
                     result.unmappable.append(
                         Unmappable(
-                            "command outside the NSG action vocabulary",
+                            "command outside the NetSecGame action vocabulary",
                             f"{facts.executable}: {facts.shell_text[:120]}",
                             dict(evidence_base, executable=facts.executable),
                         )
@@ -445,18 +448,18 @@ def _labels_from_commands_only(
     evidence_base: Dict[str, Any],
     states_differ: bool = False,
 ) -> List[Label]:
-    """Label actions that ran and yielded nothing NSG can see.
+    """Label actions that ran without producing an observable change.
 
-    These matter: an NSG episode is full of actions that return no new
-    knowledge, and a dataset built only from successful transitions would teach
-    the surrogate that every action pays off.
+    These are necessary to the dataset. A NetSecGame episode contains many
+    actions that return no new knowledge, and a dataset built only from
+    state-changing transitions would represent every action as successful.
 
     `states_differ` separates two genuinely different situations. When the
     observation never advanced, the action really did nothing. When the docker
-    states differ but their NSG projections are identical, the action *did*
+    states differ but their NetSecGame projections are identical, the action *did*
     something the mapping cannot see — `nmap -sS` against a host produces 1000
     service nodes that the state creator attributes to the scanning host and the
-    adapter then filters, so a successful service scan leaves no NSG trace. The
+    adapter then filters, so a successful service scan leaves no NetSecGame trace. The
     note says which case a label came from, because the second is a mapping
     problem rather than a property of the action.
     """
@@ -478,7 +481,7 @@ def _labels_from_commands_only(
                     evidence=dict(evidence_base, command=facts.shell_text),
                     notes=(
                         (
-                            "docker state advanced but its NSG projection is unchanged: "
+                            "docker state advanced but its NetSecGame projection is unchanged: "
                             "the effect of this command is invisible to the mapping"
                             if states_differ
                             else "no state change followed this command"
@@ -496,14 +499,14 @@ def _blind_exfiltration(
     source_host: IP,
     evidence_base: Dict[str, Any],
 ) -> List[Unmappable]:
-    """Exfiltration of a file from a controlled host that was never discovered.
+    """Copying a file from a controlled host without having discovered it.
 
-    An operator on a controlled host runs `scp /etc/shadow drop:/` without ever
-    having enumerated the data. NSG builds its exfiltration action space over
-    `known_data`, so there is no action for taking a file the agent has not
-    found — even though controlling the host is exactly what should make it
-    possible. These are recorded as extension requests, not invented candidates:
-    an undiscovered file has no graph node for the policy's data head to score.
+    An operator on a controlled host runs `scp /etc/shadow drop:/` without having
+    enumerated the data first. NetSecGame builds its exfiltration action space
+    over `known_data`, so there is no action for copying a file the agent has not
+    discovered, even though controlling the host is what makes it possible.
+    These are recorded rather than turned into candidates: an undiscovered file
+    has no graph node for the policy's data head to score.
     """
     if source_host not in before.controlled_hosts:
         return []
@@ -520,7 +523,7 @@ def _blind_exfiltration(
                 Unmappable(
                     "blind exfiltration of undiscovered data",
                     f"{facts.executable} moved {path} from controlled {source_host}, but the "
-                    "file was never in known_data; NSG enumerates exfiltration over discovered "
+                    "file was never in known_data; NetSecGame enumerates exfiltration over discovered "
                     "data only, so the attempt has no representation",
                     dict(evidence_base, path=path, command=facts.shell_text),
                 )
@@ -529,13 +532,13 @@ def _blind_exfiltration(
 
 
 def merge_labels(labels: Sequence[Label]) -> List[Label]:
-    """Collapse labels that name the same action.
+    """Combine labels that name the same action.
 
-    Several commands in one batch ground to the same NSG action — `cat` recorded
-    once by the shell and again by the exec fallback, or two probes of the same
-    host. They are one label with several pieces of evidence, not several
-    labels, and leaving them separate would weight that action by how noisily it
-    was observed.
+    Several commands attributed to one transition can produce the same action:
+    `cat` recorded once by the shell collector and again by the exec fallback, or
+    two probes of the same host. These are one label with several pieces of
+    evidence. Keeping them separate would weight the action by how often it was
+    observed rather than by whether it occurred.
     """
     merged: Dict[Any, Label] = {}
     order: List[Any] = []
@@ -578,7 +581,7 @@ def _ground_command(
     """Build an action from a command's arguments, grounded in known state.
 
     Returns the action and any notes about granularity the mapping had to
-    flatten — an operator's command rarely lines up exactly with an NSG action.
+    flatten — an operator's command rarely lines up exactly with an NetSecGame action.
     """
     if action_type == ActionType.ScanNetwork:
         for cidr in facts.cidrs:
@@ -599,7 +602,7 @@ def _ground_command(
                         ActionType.ScanNetwork,
                         {"source_host": source_host, "target_network": network},
                     ),
-                    (f"operator probed the single host {address}; NSG can only scan a network",),
+                    (f"operator probed the single host {address}; NetSecGame can only scan a network",),
                 )
         return None, ()
 
@@ -678,13 +681,14 @@ def _ground_command(
 def infer_source_host(
     before: GameState, provenance: Optional[Provenance]
 ) -> Tuple[Optional[IP], Optional[str]]:
-    """Which host acted.
+    """Determine which host performed the action.
 
-    A trajectory is collected inside one container, so every observed action was
-    issued from that container — the state creator's `host:local`. That is the
-    assumption encoded here, and it is recorded as a note whenever the state
-    offers more than one candidate, so a violation shows up in the data rather
-    than silently mislabelling `source_host`.
+    A trajectory is recorded inside a single container, so every observed action
+    was issued from that container, which the state creator identifies as
+    `host:local`. That assumption is applied here. When the state offers more
+    than one candidate the choice is recorded as a note on the label, so that a
+    violation of the assumption is visible in the data rather than producing an
+    incorrect `source_host` without indication.
     """
     if provenance is not None:
         local_controlled = sorted(
@@ -716,14 +720,14 @@ def _pick_exploited_service(
     commands: Sequence[CommandFacts],
     provenance: Optional[Provenance],
 ) -> Tuple[Service, Optional[str]]:
-    """Recover which service was exploited; the state diff cannot say.
+    """Determine which service was exploited, which the state difference cannot.
 
-    Ports named on the command line are matched against the real ports the state
-    creator observed (`Provenance.service_ports`). Failing that, the service
-    name is matched against the executable (`ssh` -> the ssh service). Failing
-    that, the canonical choice — the lexicographically smallest — keeps the label
-    consistent with the policy's own exploit canonicalization, and the fallback
-    is noted so these rows can be excluded from any service-level evaluation.
+    A port named on the command line is matched against the ports the state
+    creator observed (`Provenance.service_ports`). Otherwise the service name is
+    matched against the executable, so `ssh` selects the ssh service. Otherwise
+    the lexicographically smallest service is used, which matches the policy's
+    own reduction of `ExploitService`; that case is recorded as a note so the
+    affected rows can be excluded from any evaluation of the service parameter.
     """
     if provenance is not None:
         wanted_ports = {port for facts in commands for port in facts.ports}
@@ -744,14 +748,14 @@ def _pick_exploited_service(
 def _network_for_scanned_range(
     cidr: str, networks: Iterable[Network]
 ) -> Tuple[Optional[Network], Optional[str]]:
-    """Map a scanned CIDR onto a known NSG network.
+    """Map a scanned address range onto a known NetSecGame network.
 
-    Operators do not scan the networks NSG knows about. In the strategic sample
-    run the container knows `172.23.0.0/16` and the operator ran
-    `nmap -sP -n 172.23.0.0/24` — a subrange. NSG's `ScanNetwork` is
-    parameterized by a known `Network` object, so the containing network is the
-    only expressible target, and the granularity difference is recorded rather
-    than hidden. A range no known network contains is not mapped at all.
+    Operators do not necessarily scan the networks NetSecGame knows about. In
+    the strategic run the container knows `172.23.0.0/16` and the operator
+    scanned `172.23.0.0/24`, a sub-range. `ScanNetwork` takes a known `Network`
+    object, so the containing network is the only expressible target, and the
+    difference in granularity is recorded as a note. A range that no known
+    network contains is not mapped.
     """
     try:
         scanned = ipaddress.IPv4Network(cidr, strict=False)
@@ -776,7 +780,7 @@ def _network_for_scanned_range(
         return (
             network,
             f"operator scanned {scanned}, a subrange of known network {network}; "
-            "NSG can only scan a whole known network",
+            "NetSecGame can only scan a whole known network",
         )
     return None, None
 
@@ -815,7 +819,7 @@ def _unmappable_scan_ranges(
                     Unmappable(
                         "scan of a range that is not a known network",
                         f"{facts.executable} scanned {cidr}, which no known network contains; "
-                        "NSG's ScanNetwork is parameterized by a known network object",
+                        "NetSecGame's ScanNetwork is parameterized by a known network object",
                         dict(evidence_base, cidr=cidr, command=facts.shell_text),
                     )
                 )
@@ -837,10 +841,10 @@ def _containing_network(host: IP, networks: Iterable[Network]) -> Optional[Netwo
 
 
 def _rejection_reason(action: Action, candidates: Sequence[Action]) -> Optional[str]:
-    """Why this action is not valid in the before-state, if it is not.
+    """Why this action is not valid in the before-state, or `None` if it is.
 
-    The gate that keeps the dataset learnable: the factored policy can only ever
-    emit actions from this set, so a label outside it is unusable supervision.
+    The policy can only select actions from the candidate set, so a label
+    outside that set cannot be used as a training target.
     """
     if contains(candidates, action):
         return None

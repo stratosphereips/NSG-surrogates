@@ -1,26 +1,29 @@
-"""`GameState` -> PyTorch Geometric `HeteroData`.
+"""`GameState` to PyTorch Geometric `HeteroData`.
 
-Feature layout, node types, edge types and node ordering are byte-compatible
-with `sgrl_netsec/policy_netsec.py:state_to_pyg`, so a checkpoint trained in the
-simulator loads and means the same thing here. Two feature *sources* differ,
-because the simulator's versions are unusable in a container range:
+Feature layout, node types, edge types and node ordering match
+`sgrl_netsec/policy_netsec.py:state_to_pyg` exactly, so a checkpoint trained in
+the simulator loads here and its inputs mean the same thing. Two features are
+computed from different sources, because the simulator's definitions carry no
+information in a container network:
 
-`host[1]` "is public"
-    The simulator reads `netaddr.IPAddress(...).is_private()`. A docker range is
-    entirely RFC1918, so that feature is 0 for every host and the exfiltration
-    destination head has nothing to discriminate on. Here the bit means "is a
-    designated external host", supplied by `Provenance.external_hosts`.
+`host[1]`, whether the host is external
+    The simulator evaluates `netaddr.IPAddress(...).is_private()`. A container
+    network is entirely RFC1918, so that value is 0 for every host and the
+    exfiltration destination head has nothing to discriminate on. Here the
+    feature means "declared as outside the range", taken from
+    `Provenance.external_hosts`.
 
-`service[0]` "port"
-    The simulator parses `int(service.name.split("/")[0])`, but `Service.name`
-    holds a service *name* (`ssh`, `https`), so the parse raises and the feature
-    is silently always 0 — a dead input in the trained policy. The state creator
-    reports the real port, carried here in `Provenance.service_ports`.
+`service[0]`, the port
+    The simulator computes `int(service.name.split("/")[0])`, but `Service.name`
+    holds a service name such as `ssh` or `https`. The conversion raises, the
+    exception is caught, and the feature is 0 for every service, so a
+    simulator-trained policy has never received a non-zero value there. The
+    state creator reports the real port, supplied here through
+    `Provenance.service_ports`.
 
-Both are noted rather than hidden: a simulator-trained checkpoint has never seen
-a nonzero `service[0]`, so enabling it changes the input distribution. Pass
-`legacy_service_port=True` to reproduce the simulator's dead feature exactly
-when comparing against simulator behaviour.
+Enabling the port feature therefore changes the input distribution relative to a
+simulator-trained checkpoint. Pass `legacy_service_port=True` to reproduce the
+simulator's behaviour when comparing the two.
 """
 
 from __future__ import annotations
@@ -55,7 +58,7 @@ def _norm(count: float) -> float:
 
 
 def _is_external(host: IP, provenance: Optional[Provenance]) -> bool:
-    """Designated-external test, replacing the simulator's public-IP test."""
+    """Whether a host is outside the range, by declaration or by address."""
     if provenance is not None and provenance.external_hosts:
         return host in provenance.external_hosts
     try:
@@ -70,11 +73,11 @@ def state_to_pyg(
     provenance: Optional[Provenance] = None,
     legacy_service_port: bool = False,
 ) -> Tuple[HeteroData, Dict[str, dict], Dict[str, list]]:
-    """Build the heterogeneous graph plus both index maps.
+    """Build the heterogeneous graph and both index mappings.
 
-    Node order within each type is `sorted(..., key=str)` — set iteration order
-    is random in Python, and a scrambled node order would scramble the topology
-    the policy sees between two calls on the same state.
+    Node order within each type is `sorted(..., key=str)`. Python's set
+    iteration order varies between processes, and an unstable node order would
+    present a different topology to the policy on two calls with the same state.
     """
     data = HeteroData()
     object_to_idx: Dict[str, dict] = {node_type: {} for node_type in NODE_TYPES}
@@ -145,8 +148,9 @@ def state_to_pyg(
     )
 
     # ── data ─────────────────────────────────────────────────────────────────
-    # "Exfiltrated" means: a copy sits on a controlled host that is outside the
-    # range. In the simulator that was "controlled and public".
+    # A data item counts as exfiltrated when a copy is present on a controlled
+    # host outside the range; in the simulator the test was controlled and
+    # public.
     external_controlled = {
         host for host in state.controlled_hosts if _is_external(host, provenance)
     }
@@ -211,16 +215,16 @@ def state_to_pyg(
 
 
 def state_summary(state: GameState, provenance: Optional[Provenance] = None) -> torch.Tensor:
-    """Phase-of-attack vector fed alongside the pooled graph embedding.
+    """Three counts summarising how far the episode has progressed.
 
-      [0] controlled hosts with no known data      -> need FindData
-      [1] known data not yet exfiltrated           -> need ExfiltrateData
-      [2] uncontrolled hosts with known services   -> can ExploitService
+      [0] controlled hosts with no known data      -> FindData is applicable
+      [1] known data on uncontrolled hosts         -> ExfiltrateData is applicable
+      [2] uncontrolled hosts with known services   -> ExploitService is applicable
 
-    Kept dimension- and order-identical to the simulator agent's
-    `_state_summary`. Note the middle term counts data on hosts the agent does
-    not control, which in the real range is 0 whenever every data item was found
-    on the observed container itself.
+    The dimension and order match the simulator agent's `_state_summary`. The
+    second value counts data on hosts the agent does not control, so in the
+    emulated range it is zero whenever every data item was found on the observed
+    container itself (finding 10).
     """
     controlled = state.controlled_hosts
     controlled_without_data = sum(1 for host in controlled if not state.known_data.get(host))
@@ -245,7 +249,7 @@ def _service_port(
     legacy: bool,
 ) -> Optional[int]:
     if legacy:
-        # Reproduce the simulator's parse, which fails for named services.
+        # Reproduce the simulator's conversion, which fails for named services.
         try:
             return int(service.name.split("/")[0])
         except (ValueError, IndexError):

@@ -1,9 +1,9 @@
-"""The factored action schema: which decision each head makes, per action type.
+"""Which parameter each of the four heads selects, per action type.
 
-Identical to `sgrl_netsec/policy_netsec.py`'s tables. Keeping them declarative
-(rather than branching inside the policy) is what lets the same four heads emit
-five differently-shaped parameterized actions, and is the single place to edit
-when the NSG action vocabulary changes.
+The tables are the same as in `sgrl_netsec/policy_netsec.py`. Holding them as
+data rather than as branches inside the policy is what allows four heads to
+produce five differently shaped actions, and it means the action vocabulary is
+described in one place.
 
     ScanNetwork      source -> target_network
     FindServices     source -> target_host
