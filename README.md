@@ -128,11 +128,126 @@ python -m nsg_surrogate act $OBS $SCOPE $DROP \
     --weights models/surrogate.pth --temperature 0.1
 ```
 
+### Two flags that are not optional in practice
+
+`--scope CIDR` restricts which hosts count as targets. The state creator records
+every host the container ever contacted, so without a scope the projected NSG
+state includes public internet hosts — 16 of 20 in the sample run — and NSG
+treats every known host as attackable. See finding 1.
+
+`--external-host IP` declares a host as outside the range. It replaces the
+simulator's `is_private()` test (meaningless in an all-RFC1918 docker network)
+and gives `ExfiltrateData` a destination, without which exfiltration is
+unreachable. See findings 2 and 3.
+
 Any flag in steps 1–4 that changes the projection (`--scope`, `--external-host`,
 `--min-confidence`, `--any-service-status`, `--unconfirmed-data`,
 `--no-data-denylist`, `--include-inferred-networks`, `--max-data-per-host`) must
 match between `dataset` and `train`: the trainer re-projects from the stored
 graphs, and it warns when the result differs from what the dataset recorded.
+
+## Play the surrogate in NetSecGame
+
+The return leg of the emulation -> simulation -> emulation loop: the same policy
+trained on real container states runs as an ordinary NSG agent over the
+coordinator's socket, the way `sgrl_netsec/blackbox_pure_gnn_agent.py` does. That
+makes the surrogate both **measurable** on simulator scenarios and **usable as an
+opponent** for training other agents in NetSecGame.
+
+**1. Start a game server** (not started by this repo). From the NetSecGame
+checkout:
+
+```bash
+cd /opt/Agents/NetSecGame
+docker run -d --rm --name nsg-server \
+  -v $(pwd)/examples/example_task_configuration.yaml:/netsecgame/netsecenv_conf.yaml \
+  -v $(pwd)/logs:/netsecgame/logs \
+  -p 9000:9000 stratosphereips/netsecgame
+
+# or without docker
+python3 -m netsecgame.game.worlds.NetSecGame \
+  --task_config=./examples/example_task_configuration.yaml --game_port=9000
+```
+
+**2. Play.** Defaults to `models/surrogate.pth` and 10 episodes:
+
+```bash
+cd /opt/Agents/NSG-surrogates
+python -m nsg_surrogate play --host 127.0.0.1 --port 9000 --episodes 20
+python -m nsg_surrogate play --episodes 20 --verbose            # every action
+python -m nsg_surrogate play --episodes 100 --metrics models/play.json
+python -m nsg_surrogate play --weights ""                       # random policy, exercises the path
+```
+
+Output is the same shape the simulator agent reports, so numbers are directly
+comparable. This is the real first run, 20 episodes on
+`example_task_configuration.yaml`:
+
+```
+win rate 0.0% ± 0.0 SE (0/20) | steps all 50.0 ± 0.0 | steps wins n/a | reward -60.00 ± 0.00
+action types  {'FindData': 710, 'FindServices': 220, 'ScanNetwork': 70}
+end reasons   {'AgentStatus.TimeoutReached': 20}
+```
+
+Spread travels with every mean on purpose: a win rate from 20 episodes is not a
+measurement without its standard error, and `steps wins` reads `n/a` rather than
+`0.0` when nothing was won. `fallbacks` counts steps where the factorization
+could not represent the candidate set and the agent had to act uniformly — it
+should be 0.
+
+### First live run: the clone reproduces its operator, including the gaps
+
+Run against a live server on port 9099, 20 episodes each, trained checkpoint
+versus a randomly initialised policy as the control:
+
+| Action type | trained surrogate | random init | training pairs |
+|---|---:|---:|---:|
+| `FindData` | 710 (71%) | 268 (27%) | 14 (67%) |
+| `FindServices` | 220 (22%) | 599 (60%) | 3 (14%) |
+| `ScanNetwork` | 70 (7%) | 55 (6%) | 4 (19%) |
+| `ExploitService` | **0** | 78 (8%) | 0 |
+| `ExfiltrateData` | 0 | 0 | 0 |
+| win rate | 0/20 | 0/20 | — |
+
+The action mix tracks the *training distribution*, not the random baseline, so
+the behaviour cloning transferred something real: this operator read local files
+and enumerated services, and so does the clone. It is also the sharpest possible
+demonstration of the gap — the surrogate emits `ExploitService` **zero** times
+where the untrained policy tries it 78 times. Having never seen an exploit, the
+clone has learned to avoid the one action type that would let it progress.
+
+Neither policy wins, and neither can: the scenario's goal is exfiltrated data,
+reaching it requires exploiting a host first, and no training pair contains
+either action. A 0% win rate here is the expected, correct outcome of cloning 21
+discovery-only steps — not a bug in the agent, and not a ceiling on the method.
+
+### Flags that change behaviour
+
+| Flag | Effect |
+|---|---|
+| `--temperature 0.1` (default) | Low-temperature sampling. Pure argmax composes badly in a factored action space — each head's independent best does not make the best action — which is why the simulator agent samples too. |
+| `--greedy` | Take each head's argmax anyway. Deterministic, useful for reproducing one episode. |
+| `--raw-action-space` | Keep NSG's exfiltrations from *uncontrolled* source hosts. Off by default because the game refuses them (see `docs/poc-findings.md` finding 18); turn it on for a byte-identical candidate set to the simulator agent. |
+| `--external-host IP` | Declare a host as outside the range. Without it the encoder falls back to `is_private()`, which is the right test in the simulator (public IPs exist there) and useless in a container range. |
+| `--seed`, `--episodes`, `--metrics` | As expected; `--metrics` writes the stats as JSON. |
+
+### What to expect, and what not to
+
+The checkpoint in `models/` was cloned from **21 pairs of real container
+behaviour covering three of five action types**, so playing it against a
+simulator scenario measures transfer across a distribution gap in both
+directions at once — different topology, different scale, and two action types
+it has never emitted. A low win rate is the expected outcome and is
+informative; treat it as a baseline for the loop, not as the surrogate's ceiling.
+
+Two structural limits worth knowing before reading the numbers:
+
+- **Attacker role only.** The policy has no `BlockIP` head, so it cannot play
+  `AgentRole.Defender`. Training a defender *against* the surrogate works;
+  running the surrogate as one does not.
+- **No learning in this path.** `play` evaluates; it does not update weights.
+  `SurrogateController.state_value()` exposes `V(s)` from the shared backbone for
+  anyone wiring the surrogate into an RL loop later.
 
 ## Where things are stored
 
@@ -148,18 +263,6 @@ apiece (27 MB for the two runs here). Override the locations with
 `NSG_SURROGATE_DATASETS` / `NSG_SURROGATE_MODELS`, or per-invocation with
 `--out`.
 
-### Two flags that are not optional in practice
-
-`--scope CIDR` restricts which hosts count as targets. The state creator records
-every host the container ever contacted, so without a scope the projected NSG
-state includes public internet hosts — 16 of 20 in the sample run — and NSG
-treats every known host as attackable. See finding 1.
-
-`--external-host IP` declares a host as outside the range. It replaces the
-simulator's `is_private()` test (meaningless in an all-RFC1918 docker network)
-and gives `ExfiltrateData` a destination, without which exfiltration is
-unreachable. See findings 2 and 3.
-
 ## Module map
 
 | Module | Needs torch | Responsibility |
@@ -174,6 +277,7 @@ unreachable. See findings 2 and 3.
 | `encoder.py` | yes | `GameState` -> `HeteroData`, feature-compatible with `sgrl_netsec` |
 | `policy.py` | yes | `FactoredGNNPolicy` (parameter-identical to the simulator agent) and `SurrogatePolicy` |
 | `translator_adapter.py` | yes | `PolicyAdapter`-shaped wrapper so `nsg-action-translator` can drive it |
+| `nsg_agent.py` | yes | `SurrogateController` (socket-free decisions) and `SurrogateAgent` (a `BaseAgent` that plays episodes against the game server) |
 
 ## Tests
 
@@ -291,15 +395,21 @@ the pipeline, not a measurement of the surrogate.
 
 ## Status
 
-Verified end to end on `NSG-docker-state-creator/observation/manual-run`: real
-observation graph -> `GameState` -> hetero graph -> four factored heads -> NSG
-action JSON the translator accepts.
+Verified end to end on the real observation runs: state graph -> `GameState` ->
+hetero graph -> four factored heads -> NSG action JSON, then labelled pairs ->
+behaviour cloning -> a checkpoint that decodes actions again. 112 tests.
 
 Not yet done:
 
-- No trained checkpoint exists on this machine, so transfer is proven
-  structurally (weights load, shapes match) but not behaviourally.
-- The only available observation runs are `operational` level; the intended
-  input is `strategic`. A rebuild at that level is needed to confirm.
+- **`play` works against a live server** (verified on port 9099, 40 episodes
+  across two configurations) but the surrogate cannot win any scenario yet: see
+  the first-live-run table above.
+- **21 training pairs, three of five action types.** The checkpoint is a
+  pipeline-correctness artifact, not a usable policy. `ExploitService` and
+  `ExfiltrateData` have no examples at all.
+- **Two of five action types are executable in the real range.** The translator
+  runs `ScanNetwork` and `FindServices` live; `FindData` is unsupported and
+  exploit/exfiltration are blocked, so the emulation leg of the loop cannot yet
+  close past discovery.
 - The translator's policy registry offers only `random`, so
   `SurrogatePolicyAdapter` cannot yet be selected from its CLI.

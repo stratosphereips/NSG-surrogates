@@ -315,6 +315,52 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_play(args: argparse.Namespace) -> int:
+    from .nsg_agent import play
+    from .state_adapter import Provenance
+
+    provenance = None
+    if args.external_host:
+        provenance = Provenance()
+        for address in args.external_host:
+            from netsecgame.game_components import IP
+
+            provenance.external_hosts.add(IP(address))
+
+    try:
+        stats = play(
+            args.host,
+            args.port,
+            args.episodes,
+            weights=args.weights,
+            temperature=args.temperature,
+            seed=args.seed,
+            greedy=args.greedy,
+            raw_action_space=args.raw_action_space,
+            provenance=provenance,
+            verbose=args.verbose,
+        )
+    except ConnectionError as error:
+        print(error, file=sys.stderr)
+        return 2
+
+    print()
+    print(stats.summary_line())
+    print(f"action types  {stats.action_type_counts}")
+    print(f"end reasons   {stats.end_reasons}")
+    if stats.fallbacks:
+        print(
+            f"fallbacks     {stats.fallbacks} step(s) where the factorization could not "
+            "represent the candidate set"
+        )
+    if args.metrics:
+        os.makedirs(os.path.dirname(os.path.abspath(args.metrics)) or ".", exist_ok=True)
+        with open(args.metrics, "w", encoding="utf-8") as handle:
+            json.dump(stats.as_dict(), handle, indent=2, sort_keys=True)
+        print(f"metrics -> {args.metrics}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nsg_surrogate", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -391,6 +437,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("--quiet", action="store_true")
     train.set_defaults(func=cmd_train)
+
+    play_parser = subparsers.add_parser(
+        "play", help="run the surrogate against a live NetSecGame server (needs torch)"
+    )
+    play_parser.add_argument("--host", default="127.0.0.1")
+    play_parser.add_argument("--port", default=9000, type=int)
+    play_parser.add_argument("--episodes", default=10, type=int)
+    play_parser.add_argument(
+        "--weights",
+        default=os.path.join(MODELS_DIR, f"{DEFAULT_MODEL_NAME}.pth"),
+        help="checkpoint to play; omit the file to play a randomly initialised policy",
+    )
+    play_parser.add_argument(
+        "--temperature",
+        default=0.1,
+        type=float,
+        help="low-temperature sampling keeps the policy near-greedy without the "
+        "argmax lock-in that factored action spaces suffer from",
+    )
+    play_parser.add_argument(
+        "--greedy", action="store_true", help="take each head's argmax instead of sampling"
+    )
+    play_parser.add_argument(
+        "--raw-action-space",
+        action="store_true",
+        help="keep NSG's exfiltrations from uncontrolled source hosts, for parity "
+        "with the simulator agent's candidate set",
+    )
+    play_parser.add_argument(
+        "--external-host",
+        action="append",
+        metavar="IP",
+        help="host treated as outside the range; without any, the encoder falls back "
+        "to the simulator's is_private() test",
+    )
+    play_parser.add_argument("--seed", default=42, type=int)
+    play_parser.add_argument("--metrics", default=None, metavar="PATH")
+    play_parser.add_argument("--verbose", action="store_true")
+    play_parser.set_defaults(func=cmd_play)
 
     act = subparsers.add_parser("act", help="choose one NSG action (needs torch)")
     _add_adapter_flags(act)
