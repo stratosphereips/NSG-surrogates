@@ -305,23 +305,48 @@ class CandidateGateTests(unittest.TestCase):
         self.assertTrue(candidates.contains([one], other))
 
     def test_exfiltration_from_an_uncontrolled_host_is_not_a_candidate(self):
-        """Knowing where data is is not being able to take it.
+        """Knowing where data is does not imply being able to copy it.
 
-        NSG's own `generate_valid_actions` emits this action; the game will not
-        execute it, so `enumerate_actions` corrects the generator by default.
+        The invariant asserted here holds regardless of what the upstream
+        generator does: the candidate set this repository produces contains no
+        exfiltration whose source host is uncontrolled.
+
+        NetSecGame's `generate_valid_actions` currently omits that check (see
+        `docs/poc-findings.md` finding 18, reported upstream). Whether it still
+        does is checked separately and reported, not asserted — this test must
+        keep passing after the upstream fix, at which point the correction in
+        `enumerate_actions` becomes a no-op rather than a divergence.
         """
         state = base_state(known_hosts={LOCAL, TARGET}, known_data={TARGET: {SECRET}})
-        raw = candidates.enumerate_actions(state, require_controlled_exfil_source=False)
-        corrected = candidates.enumerate_actions(state)
+        corrected = [
+            action
+            for action in candidates.enumerate_actions(state)
+            if action.type == ActionType.ExfiltrateData
+        ]
+        self.assertEqual(corrected, [], "corrected candidate set must exclude it")
 
-        raw_exfil = [a for a in raw if a.type == ActionType.ExfiltrateData]
-        self.assertEqual(len(raw_exfil), 1, "upstream generator emits it")
-        self.assertEqual(raw_exfil[0].parameters["source_host"], TARGET)
-        self.assertEqual(
-            [a for a in corrected if a.type == ActionType.ExfiltrateData],
-            [],
-            "the corrected candidate set excludes it",
-        )
+    def test_correction_is_idempotent_once_upstream_is_fixed(self):
+        """Record whether the upstream generator still needs correcting.
+
+        Passes either way. The message names which state upstream is in, so a
+        failing assertion elsewhere can be attributed correctly.
+        """
+        state = base_state(known_hosts={LOCAL, TARGET}, known_data={TARGET: {SECRET}})
+        raw = [
+            action
+            for action in candidates.enumerate_actions(
+                state, require_controlled_exfil_source=False
+            )
+            if action.type == ActionType.ExfiltrateData
+        ]
+        if raw:
+            self.assertEqual(
+                [action.parameters["source_host"] for action in raw],
+                [TARGET],
+                "upstream still emits exfiltration from an uncontrolled host",
+            )
+        # else: upstream now applies the control check itself, and
+        # require_controlled_exfil_source has nothing left to remove.
 
     def test_data_moving_off_an_uncontrolled_host_is_unmappable(self):
         before = base_state(known_hosts={LOCAL, TARGET}, known_data={TARGET: {SECRET}})

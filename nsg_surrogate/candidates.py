@@ -7,10 +7,12 @@ surrogate's action space is the one an agent trained in the simulator learned
 against — that identity is the premise of porting a policy out to the real
 range.
 
-One documented correction is applied on top: the upstream generator emits
-`ExfiltrateData` from hosts the agent does not control, which the game itself
-will not execute (see `enumerate_actions`). Knowing where data is does not mean
-being able to take it.
+One correction is applied on top: at the time of writing, the upstream generator
+emits `ExfiltrateData` from hosts the agent does not control, which the game
+itself will not execute (see `enumerate_actions`). Knowing where data resides
+does not imply being able to copy it from there. The omission has been reported
+upstream; once it is fixed the correction removes nothing and can stay in place
+or be dropped.
 
 Not representable at all, and therefore not in the candidate set: exfiltrating
 data from a *controlled* host without having discovered it first — the blind
@@ -55,14 +57,14 @@ def enumerate_actions(
 ) -> List[Action]:
     """All NSG-valid actions for `state`, in deterministic order.
 
-    `require_controlled_exfil_source` corrects the upstream generator. NSG's
-    `generate_valid_actions` builds `ExfiltrateData` by iterating
-    `state.known_data` for the source host and never checks that the agent
-    controls it, so it emits exfiltrations *from* hosts the agent has only
-    learned about — which the game itself will not carry out. Knowing that data
-    sits on a host is not the same as being able to take it. The correction is
-    applied by default and is a deliberate, documented divergence from
-    upstream; pass `False` to reproduce the raw generator.
+    `require_controlled_exfil_source` excludes exfiltration actions whose source
+    host the agent does not control. NetSecGame's `generate_valid_actions`
+    builds `ExfiltrateData` by iterating `state.known_data` for the source host
+    without checking control, so it offers actions the game will not carry out.
+    That omission is reported upstream (`docs/poc-findings.md` finding 18); when
+    it is fixed this filter removes nothing, so the default stays correct in
+    both cases. Pass `False` to enumerate exactly what the installed
+    `netsecgame` generates.
     """
     actions = sorted(generate_valid_actions(state, include_blocks=include_blocks), key=action_sort_key)
     if require_controlled_exfil_source:

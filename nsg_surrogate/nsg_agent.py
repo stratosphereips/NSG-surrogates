@@ -13,14 +13,14 @@ agent over the coordinator's socket, exactly the way
   is the only way to compare them.
 
 `SurrogateController` holds everything that decides an action and needs no
-socket, so it is testable offline and is shared with `translator_adapter`.
-`SurrogateAgent` is the thin `BaseAgent` subclass that owns the connection.
+socket, so it can be tested without a running server. `SurrogateAgent` is the
+`BaseAgent` subclass that owns the connection and the episode loop.
 
-One deliberate difference from the simulator agent: the candidate set applies
-the exfiltration source-host correction documented in `candidates`. NSG's own
-generator offers exfiltrations from hosts the agent does not control and the
-game refuses them, so a policy that picks one wastes a step. Pass
-`raw_action_space=True` for byte-parity with the simulator agent instead.
+The candidate set applies the exfiltration source-host filter documented in
+`candidates`: NetSecGame's generator currently offers exfiltrations from hosts
+the agent does not control, and the game refuses them, so selecting one wastes a
+step. Pass `raw_action_space=True` to enumerate exactly what the installed
+`netsecgame` generates instead.
 """
 
 from __future__ import annotations
