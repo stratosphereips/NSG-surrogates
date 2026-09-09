@@ -45,6 +45,16 @@ class AttemptCounts:
         if counter is not None and key is not None:
             counter[key] = counter.get(key, 0) + 1
 
+    def snapshot(self) -> "AttemptCounts":
+        """An independent copy, for recording history as of one step."""
+        return AttemptCounts(
+            scan=dict(self.scan),
+            findservices=dict(self.findservices),
+            finddata=dict(self.finddata),
+            exploit=dict(self.exploit),
+            exfil=dict(self.exfil),
+        )
+
     def total(self) -> int:
         return sum(
             sum(counter.values())

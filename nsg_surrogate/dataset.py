@@ -384,7 +384,7 @@ def _row(
         "projection_cache": {
             "adapter_version": ADAPTER_VERSION,
             "config_hash": config_hash,
-            "game_state": json.loads(before_projection.state.as_json()),
+            "game_state": canonical_game_state(before_projection.state),
             "candidate_count": len(candidate_actions),
             "candidate_breakdown": breakdown(candidate_actions),
             "label_in_candidates": True,
@@ -449,6 +449,32 @@ def read_pairs(path: str) -> Iterator[Dict[str, Any]]:
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def canonical_game_state(state) -> Dict[str, Any]:
+    """`GameState` as JSON-ready data with every list deterministically ordered.
+
+    `GameState.as_json` walks sets, so its list order varies between processes
+    (string hashing is randomised per interpreter). The states compare equal but
+    the files do not, which makes dataset diffs noisy and any byte comparison of
+    a cached projection a coin flip. Sorting by string form fixes both.
+    """
+    raw = json.loads(state.as_json())
+    return {
+        key: sorted(value, key=lambda item: json.dumps(item, sort_keys=True))
+        if isinstance(value, list)
+        else {
+            inner_key: sorted(
+                inner_value, key=lambda item: json.dumps(item, sort_keys=True)
+            )
+            if isinstance(inner_value, list)
+            else inner_value
+            for inner_key, inner_value in sorted(value.items())
+        }
+        if isinstance(value, dict)
+        else value
+        for key, value in sorted(raw.items())
+    }
 
 
 def _trajectory_dir(observation_root: str) -> str:

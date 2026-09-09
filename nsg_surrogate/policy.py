@@ -27,6 +27,7 @@ from torch.distributions import Categorical
 from netsecgame.game_components import Action, ActionType, GameState
 
 from . import candidates as candidates_mod
+from . import factorization
 from .action_schema import (
     ACTION_SECONDARY_NODE_TYPE,
     ACTION_SECONDARY_PARAM,
@@ -37,6 +38,7 @@ from .action_schema import (
 )
 from .attempt_counts import AttemptCounts
 from .encoder import EDGE_TYPES, FEATURE_DIM, NODE_TYPES, state_summary, state_to_pyg
+from .factorization import HeadTargets
 from .state_adapter import Provenance
 
 
@@ -144,6 +146,104 @@ class FactoredGNNPolicy(nn.Module):
 
     # ── decision ─────────────────────────────────────────────────────────────
 
+    def head_logits(
+        self,
+        data,
+        object_to_idx: Dict[str, dict],
+        valid_actions: List[Action],
+        targets: HeadTargets,
+        summary: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Logits for every active head, conditioned on the *true* prefix.
+
+        Teacher forcing. At inference each head is conditioned on what the
+        previous heads sampled; during supervised training it must be
+        conditioned on what they *should* have chosen, or the later heads learn
+        to correct the earlier ones' mistakes instead of learning their own job.
+
+        Candidate lists come from `factorization`, the same code the decoder
+        uses, so index `i` means the same object in both directions.
+        """
+        device = next(self.parameters()).device
+        zero = torch.zeros(self.hidden_channels, device=device)
+        if summary is None:
+            summary = torch.zeros(self.NUM_STATE_SUMMARY, device=device)
+
+        embeddings = self._gnn_forward(data)
+        pooled = self._global_emb(embeddings, device)
+        logits: Dict[str, torch.Tensor] = {}
+
+        mask = torch.tensor(
+            factorization.type_mask(valid_actions), dtype=torch.bool, device=device
+        )
+        logits["type"] = self.type_head(torch.cat([pooled, summary])).masked_fill(~mask, -1e9)
+
+        action_type = ACTION_TYPE_LIST[targets.type_index]
+        type_context = self.type_emb(torch.tensor(targets.type_index, device=device))
+        remaining = [a for a in valid_actions if a.type == action_type]
+
+        source_embedding = zero
+        sources = factorization.source_candidates(remaining, object_to_idx)
+        if sources and targets.source_index is not None:
+            host_embeddings = embeddings.get(
+                "host", torch.empty(0, self.hidden_channels, device=device)
+            )
+            logits["source"] = torch.stack(
+                [
+                    self.src_head(torch.cat([host_embeddings[idx], pooled, type_context])).squeeze(-1)
+                    for _, idx in sources
+                ]
+            )
+            chosen_source, chosen_idx = sources[targets.source_index]
+            source_embedding = host_embeddings[chosen_idx]
+            remaining = factorization.narrow(remaining, "source_host", chosen_source)
+
+        picks, target_param, target_node_type = factorization.target_candidates(
+            remaining, action_type, object_to_idx
+        )
+        target_embedding = zero
+        if picks and targets.target_index is not None and target_node_type:
+            node_embeddings = embeddings.get(
+                target_node_type, torch.empty(0, self.hidden_channels, device=device)
+            )
+            logits["target"] = torch.stack(
+                [
+                    self.tgt_head(
+                        torch.cat([node_embeddings[idx], pooled, type_context, source_embedding])
+                    ).squeeze(-1)
+                    for _, idx in picks
+                ]
+            )
+            chosen_target, chosen_idx = picks[targets.target_index]
+            target_embedding = node_embeddings[chosen_idx]
+            remaining = factorization.narrow(remaining, target_param, chosen_target)
+
+        secondaries, _, secondary_node_type = factorization.secondary_candidates(
+            remaining, action_type, object_to_idx
+        )
+        if secondaries and targets.secondary_index is not None and secondary_node_type:
+            node_embeddings = embeddings.get(
+                secondary_node_type, torch.empty(0, self.hidden_channels, device=device)
+            )
+            logits["secondary"] = torch.stack(
+                [
+                    self.sec_head(
+                        torch.cat(
+                            [
+                                node_embeddings[idx],
+                                pooled,
+                                type_context,
+                                source_embedding,
+                                target_embedding,
+                            ]
+                        )
+                    ).squeeze(-1)
+                    for _, idx in secondaries
+                ]
+            )
+
+        return logits
+
     def decide(
         self,
         data,
@@ -151,8 +251,14 @@ class FactoredGNNPolicy(nn.Module):
         valid_actions: List[Action],
         temperature: float = 1.0,
         summary: Optional[torch.Tensor] = None,
+        greedy: bool = False,
     ) -> Decision:
-        """Sample one action, recording each head's choice."""
+        """Sample one action, recording each head's choice.
+
+        `greedy` takes each head's argmax instead of sampling, which is what
+        evaluation wants: accuracy against a labelled action is meaningless if
+        the same state yields a different action on every call.
+        """
         device = next(self.parameters()).device
         zero = torch.zeros(self.hidden_channels, device=device)
         temperature = max(temperature, 1e-8)
@@ -162,6 +268,9 @@ class FactoredGNNPolicy(nn.Module):
         pooled = self._global_emb(embeddings, device)
         if summary is None:
             summary = torch.zeros(self.NUM_STATE_SUMMARY, device=device)
+
+        def pick(distribution: Categorical, logits: torch.Tensor) -> torch.Tensor:
+            return logits.argmax() if greedy else distribution.sample()
 
         def fallback(reason: str) -> Decision:
             # The factorization cannot express the candidate set. Act, but emit
@@ -176,15 +285,12 @@ class FactoredGNNPolicy(nn.Module):
             )
 
         # ── 1. action type ───────────────────────────────────────────────────
-        valid_types = {action.type for action in valid_actions}
         type_mask = torch.tensor(
-            [action_type in valid_types for action_type in ACTION_TYPE_LIST],
-            dtype=torch.bool,
-            device=device,
+            factorization.type_mask(valid_actions), dtype=torch.bool, device=device
         )
         type_logits = self.type_head(torch.cat([pooled, summary])).masked_fill(~type_mask, -1e9)
         type_dist = Categorical(logits=type_logits / temperature)
-        type_index = type_dist.sample()
+        type_index = pick(type_dist, type_logits)
         chosen_type = ACTION_TYPE_LIST[int(type_index.item())]
         type_context = self.type_emb(type_index)
         log_prob = type_dist.log_prob(type_index)
@@ -195,115 +301,86 @@ class FactoredGNNPolicy(nn.Module):
 
         # ── 2. source host ───────────────────────────────────────────────────
         source_embedding = zero
-        valid_sources = {
-            action.parameters["source_host"]
-            for action in remaining
-            if "source_host" in action.parameters
-        }
-        if valid_sources:
+        sources = factorization.source_candidates(remaining, object_to_idx)
+        if sources:
             host_embeddings = embeddings.get(
                 "host", torch.empty(0, self.hidden_channels, device=device)
             )
-            scores, keys = [], []
-            for obj, idx in object_to_idx.get("host", {}).items():
-                if obj in valid_sources:
-                    scores.append(
-                        self.src_head(torch.cat([host_embeddings[idx], pooled, type_context])).squeeze(-1)
-                    )
-                    keys.append((obj, idx))
-            if scores:
-                source_dist = Categorical(logits=torch.stack(scores) / temperature)
-                pick = source_dist.sample()
-                chosen_source, source_index = keys[int(pick.item())]
-                source_embedding = host_embeddings[source_index]
-                log_prob = log_prob + source_dist.log_prob(pick)
-                entropy = entropy + source_dist.entropy()
-                choices["source_host"] = str(chosen_source)
-                remaining = [
-                    action
-                    for action in remaining
-                    if action.parameters.get("source_host") == chosen_source
+            scores = torch.stack(
+                [
+                    self.src_head(torch.cat([host_embeddings[idx], pooled, type_context])).squeeze(-1)
+                    for _, idx in sources
                 ]
+            )
+            source_dist = Categorical(logits=scores / temperature)
+            picked = pick(source_dist, scores)
+            chosen_source, source_index = sources[int(picked.item())]
+            source_embedding = host_embeddings[source_index]
+            log_prob = log_prob + source_dist.log_prob(picked)
+            entropy = entropy + source_dist.entropy()
+            choices["source_host"] = str(chosen_source)
+            remaining = factorization.narrow(remaining, "source_host", chosen_source)
 
         # ── 3. primary target ────────────────────────────────────────────────
-        target_param = ACTION_TARGET_PARAM.get(chosen_type)
-        target_node_type = ACTION_TARGET_NODE_TYPE.get(chosen_type)
+        picks, target_param, target_node_type = factorization.target_candidates(
+            remaining, chosen_type, object_to_idx
+        )
         if target_param is None or target_node_type is None:
             return fallback(f"no target schema for {chosen_type.name}")
+        if not picks:
+            return fallback(f"no {target_node_type} node for any valid {target_param}")
 
-        valid_targets = {
-            action.parameters[target_param]
-            for action in remaining
-            if target_param in action.parameters
-        }
         target_embeddings = embeddings.get(
             target_node_type, torch.empty(0, self.hidden_channels, device=device)
         )
-        scores, keys = [], []
-        for obj, idx in object_to_idx.get(target_node_type, {}).items():
-            if obj in valid_targets:
-                scores.append(
-                    self.tgt_head(
-                        torch.cat([target_embeddings[idx], pooled, type_context, source_embedding])
-                    ).squeeze(-1)
-                )
-                keys.append((obj, idx))
-        if not scores:
-            return fallback(f"no {target_node_type} node for any valid {target_param}")
-
-        target_dist = Categorical(logits=torch.stack(scores) / temperature)
-        pick = target_dist.sample()
-        chosen_target, target_index = keys[int(pick.item())]
+        scores = torch.stack(
+            [
+                self.tgt_head(
+                    torch.cat([target_embeddings[idx], pooled, type_context, source_embedding])
+                ).squeeze(-1)
+                for _, idx in picks
+            ]
+        )
+        target_dist = Categorical(logits=scores / temperature)
+        picked = pick(target_dist, scores)
+        chosen_target, target_index = picks[int(picked.item())]
         target_embedding = target_embeddings[target_index]
-        log_prob = log_prob + target_dist.log_prob(pick)
+        log_prob = log_prob + target_dist.log_prob(picked)
         entropy = entropy + target_dist.entropy()
         choices[target_param] = str(chosen_target)
-        remaining = [
-            action for action in remaining if action.parameters.get(target_param) == chosen_target
-        ]
+        remaining = factorization.narrow(remaining, target_param, chosen_target)
 
         # ── 4. secondary parameter ───────────────────────────────────────────
-        if chosen_type in SECONDARY_HEAD_ACTION_TYPES:
-            secondary_param = ACTION_SECONDARY_PARAM.get(chosen_type)
-            secondary_node_type = ACTION_SECONDARY_NODE_TYPE.get(chosen_type)
-            if secondary_param and secondary_node_type:
-                valid_secondaries = {
-                    action.parameters[secondary_param]
-                    for action in remaining
-                    if secondary_param in action.parameters
-                }
-                secondary_embeddings = embeddings.get(
-                    secondary_node_type, torch.empty(0, self.hidden_channels, device=device)
-                )
-                scores, keys = [], []
-                for obj, idx in object_to_idx.get(secondary_node_type, {}).items():
-                    if obj in valid_secondaries:
-                        scores.append(
-                            self.sec_head(
-                                torch.cat(
-                                    [
-                                        secondary_embeddings[idx],
-                                        pooled,
-                                        type_context,
-                                        source_embedding,
-                                        target_embedding,
-                                    ]
-                                )
-                            ).squeeze(-1)
+        secondaries, secondary_param, secondary_node_type = factorization.secondary_candidates(
+            remaining, chosen_type, object_to_idx
+        )
+        if secondaries and secondary_param and secondary_node_type:
+            secondary_embeddings = embeddings.get(
+                secondary_node_type, torch.empty(0, self.hidden_channels, device=device)
+            )
+            scores = torch.stack(
+                [
+                    self.sec_head(
+                        torch.cat(
+                            [
+                                secondary_embeddings[idx],
+                                pooled,
+                                type_context,
+                                source_embedding,
+                                target_embedding,
+                            ]
                         )
-                        keys.append(obj)
-                if scores:
-                    secondary_dist = Categorical(logits=torch.stack(scores) / temperature)
-                    pick = secondary_dist.sample()
-                    chosen_secondary = keys[int(pick.item())]
-                    log_prob = log_prob + secondary_dist.log_prob(pick)
-                    entropy = entropy + secondary_dist.entropy()
-                    choices[f"secondary:{secondary_param}"] = str(chosen_secondary)
-                    remaining = [
-                        action
-                        for action in remaining
-                        if action.parameters.get(secondary_param) == chosen_secondary
-                    ]
+                    ).squeeze(-1)
+                    for _, idx in secondaries
+                ]
+            )
+            secondary_dist = Categorical(logits=scores / temperature)
+            picked = pick(secondary_dist, scores)
+            chosen_secondary = secondaries[int(picked.item())][0]
+            log_prob = log_prob + secondary_dist.log_prob(picked)
+            entropy = entropy + secondary_dist.entropy()
+            choices[f"secondary:{secondary_param}"] = str(chosen_secondary)
+            remaining = factorization.narrow(remaining, secondary_param, chosen_secondary)
 
         if len(remaining) != 1:
             return fallback(f"{len(remaining)} actions still match after all heads")
@@ -382,6 +459,7 @@ class SurrogatePolicy:
         provenance: Optional[Provenance] = None,
         temperature: float = 0.1,
         record: bool = True,
+        greedy: bool = False,
     ) -> Decision:
         actions = (
             list(valid_actions)
@@ -405,6 +483,7 @@ class SurrogatePolicy:
                 actions,
                 temperature=temperature,
                 summary=summary,
+                greedy=greedy,
             )
         if record:
             self.attempt_counts.record(decision.action)

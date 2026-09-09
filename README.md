@@ -172,6 +172,70 @@ collapse to 752 after deduplication, and yield **8 labels across 38
 transitions** (4 effect, 3 command-only, 1 corroborated), against 315
 off-vocabulary commands. See `docs/poc-findings.md` finding 16.
 
+## Training
+
+```bash
+python -m nsg_surrogate train datasets/manual-run-strategic datasets/manual-run \
+    --scope 172.23.0.0/16 --external-host 10.9.9.9 \
+    --epochs 150 --lr 0.003 --out surrogate.pth --metrics metrics.json
+```
+
+Behaviour cloning over the four factored heads: masked cross-entropy against the
+index `factorization.head_targets` says each head should have produced, with the
+true prefix as conditioning (teacher forcing). Samples are weighted by label
+confidence, so a `command`-only label at 0.5 counts half as much as a
+corroborated one at 0.9.
+
+Three properties the trainer enforces, each because getting it wrong would
+produce a number that looks fine and means nothing:
+
+- **One factorization, both directions.** `factorization.py` builds the per-head
+  candidate lists used by *both* the decoder and the target builder. If the two
+  enumerations drifted, training would optimise indices that decode to different
+  actions at inference, and no loss curve would reveal it.
+  `tests/test_training.py` round-trips every candidate in a state with all five
+  action types through `head_targets` -> `decode_targets`.
+- **Samples are re-projected from the copied graphs**, not read from
+  `projection_cache`. The graph is the source of truth; the cache is only
+  compared against, and a mismatch is reported as a stale dataset.
+- **Splits are by run** (`--holdout-run`), never by row. Rows share states, so a
+  row-level split leaks.
+
+The reported metrics include two reference lines, because accuracy alone is
+misleading at this scale: the **majority-class baseline** (a constant predictor)
+and the **deterministic ceiling** — the best any state -> action function could
+score, computed by grouping samples on what the encoder actually sees and
+crediting the most frequent label per group. An accuracy at the ceiling means
+every remaining error is a label conflict, not underfitting.
+
+### What the 21 real pairs actually show
+
+| | |
+|---|---:|
+| samples / distinct encoder inputs | 21 / 21 |
+| majority-class baseline | 0.67 |
+| deterministic ceiling | 1.00 |
+| action accuracy (150 epochs, lr 3e-3) | 0.76 |
+| action accuracy (300 epochs, lr 5e-3) | **1.00** (all four heads) |
+| illegal actions emitted | 0 |
+
+The first attempt scored exactly 0.7143 on every seed, which turned out to be
+the *data* ceiling: without interaction history, 21 samples collapse to **8
+distinct encoder inputs**, and 6 of them carry conflicting labels (the same
+projected state labelled `FindData`, `FindServices` and `ScanNetwork` at
+different points in the session). Replaying each run in trajectory order and
+snapshotting `AttemptCounts` per step — which is what those counters were added
+upstream for — makes all 21 inputs distinct and lifts the ceiling to 1.00.
+
+With enough optimisation the model reaches the ceiling exactly — 21/21, every
+head at 1.00, no illegal actions. That is the useful signal from this run: the
+targets, the teacher forcing and the decoder all agree, because a factorization
+mismatch anywhere would cap accuracy below 1.00 no matter how long it trained.
+
+What it does *not* show is generalization. 21 samples over two runs of one
+operator, evaluated in-sample, is a memorization test — a correctness check on
+the pipeline, not a measurement of the surrogate.
+
 ## Status
 
 Verified end to end on `NSG-docker-state-creator/observation/manual-run`: real

@@ -10,7 +10,7 @@ import os
 import tempfile
 import unittest
 
-from netsecgame.game_components import ActionType, IP
+from netsecgame.game_components import ActionType, GameState, IP
 
 from nsg_surrogate import dataset
 from nsg_surrogate.state_adapter import AdapterConfig, project_graph_to_game_state
@@ -178,9 +178,16 @@ class WriteTests(unittest.TestCase):
         with open(os.path.join(self.out, row["state_before"]["graph"]), "r", encoding="utf-8") as handle:
             graph = json.load(handle)
         reprojected = project_graph_to_game_state(graph, config=self.config)
+        # Compared by value, not as JSON text: `as_json` walks sets, so its list
+        # order varies between processes even for identical states.
         self.assertEqual(
-            json.loads(reprojected.state.as_json()),
+            GameState.from_json(json.dumps(row["projection_cache"]["game_state"])),
+            reprojected.state,
+        )
+        self.assertEqual(
+            dataset.canonical_game_state(reprojected.state),
             row["projection_cache"]["game_state"],
+            "stored projections must be in canonical (byte-stable) form",
         )
 
     def test_config_hash_changes_with_the_adapter_config(self):

@@ -231,6 +231,77 @@ def cmd_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train(args: argparse.Namespace) -> int:
+    from . import training
+
+    config = AdapterConfig(
+        min_confidence=args.min_confidence,
+        scope_cidrs=frozenset(args.scope or ()),
+        external_hosts=frozenset(args.external_host or ()),
+    )
+    samples, load_report = training.load_samples(
+        args.datasets, config=config, weight_by_confidence=not args.unweighted
+    )
+    print(f"loaded {load_report.samples} samples from {load_report.rows} rows")
+    print(f"  by type   {load_report.by_type}")
+    print(f"  by source {load_report.by_source}")
+    print(f"  by run    {load_report.runs}")
+    if load_report.skipped:
+        print(f"  skipped   {load_report.skipped}")
+    if load_report.projection_mismatches:
+        print(
+            f"  WARNING: {load_report.projection_mismatches} row(s) re-project differently "
+            "than their cached projection — the adapter changed since the dataset was built"
+        )
+    if not samples:
+        print("nothing trainable", file=sys.stderr)
+        return 2
+
+    train_samples, holdout = training.split_by_run(samples, args.holdout_run or ())
+    print(f"train {len(train_samples)}  holdout {len(holdout)}")
+    if not holdout:
+        print("  (no holdout run named: evaluation below is in-sample)")
+    print()
+
+    from .policy import FactoredGNNPolicy
+
+    policy = FactoredGNNPolicy()
+    result = training.train(
+        train_samples,
+        holdout=holdout,
+        epochs=args.epochs,
+        learning_rate=args.lr,
+        seed=args.seed,
+        policy=policy,
+        load=load_report,
+        verbose=not args.quiet,
+    )
+
+    print()
+    print(f"train  {result.train_eval.as_dict()}")
+    if holdout:
+        print(f"holdout {result.holdout_eval.as_dict()}")
+    evaluated = result.holdout_eval if holdout else result.train_eval
+    print(
+        f"majority-class baseline {evaluated.majority_type_baseline:.2f}"
+        " — accuracy at or below this is noise"
+    )
+    print(
+        f"deterministic ceiling   {evaluated.deterministic_ceiling:.2f}"
+        f" over {evaluated.distinct_inputs} distinct encoder inputs"
+        " — identical inputs with different labels cannot be fitted"
+    )
+
+    if args.out:
+        result.weights_path = training.save(policy, args.out)
+        print(f"weights -> {result.weights_path}")
+    if args.metrics:
+        with open(args.metrics, "w", encoding="utf-8") as handle:
+            json.dump(result.as_dict(), handle, indent=2, sort_keys=True)
+        print(f"metrics -> {args.metrics}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nsg_surrogate", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -258,6 +329,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dataset.add_argument("--json", action="store_true")
     dataset.set_defaults(func=cmd_dataset)
+
+    train = subparsers.add_parser(
+        "train", help="behaviour-clone the surrogate on labelled pairs (needs torch)"
+    )
+    train.add_argument("datasets", nargs="+", help="dataset directories holding pairs.jsonl")
+    train.add_argument("--epochs", type=int, default=40)
+    train.add_argument("--lr", type=float, default=1e-3)
+    train.add_argument("--seed", type=int, default=0)
+    train.add_argument(
+        "--holdout-run", action="append", metavar="RUN_ID",
+        help="run to keep out of training; repeatable. Splits are by run because "
+        "rows share states, and a row-level split leaks",
+    )
+    train.add_argument("--min-confidence", type=float, default=AdapterConfig.min_confidence)
+    train.add_argument("--scope", action="append", metavar="CIDR")
+    train.add_argument("--external-host", action="append", metavar="IP")
+    train.add_argument(
+        "--unweighted", action="store_true", help="ignore label confidence as a sample weight"
+    )
+    train.add_argument("--out", default=None, metavar="PATH", help="write the checkpoint here")
+    train.add_argument("--metrics", default=None, metavar="PATH", help="write metrics JSON here")
+    train.add_argument("--quiet", action="store_true")
+    train.set_defaults(func=cmd_train)
 
     act = subparsers.add_parser("act", help="choose one NSG action (needs torch)")
     _add_adapter_flags(act)
