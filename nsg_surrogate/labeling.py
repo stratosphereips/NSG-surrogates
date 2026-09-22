@@ -52,6 +52,13 @@ COMMAND_RULES: Dict[ActionType, Tuple[str, ...]] = {
     ActionType.ExfiltrateData: ("scp", "rsync", "sftp", "nc", "ncat", "curl", "wget", "base64", "tar"),
 }
 
+#: Shells that may wrap the invocation that matters, and the tokens that
+#: separate one invocation from the next.
+SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ash", "ksh"})
+SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&"})
+#: Commands that precede the invocation rather than being it.
+COMMAND_WRAPPERS = frozenset({"env", "sudo", "nohup", "time", "exec", "set"})
+
 #: Scanning a range and probing one host both use nmap; the flags disambiguate.
 _HOST_SCAN_FLAGS = ("-sn", "-sP", "-PE")
 _SERVICE_SCAN_FLAGS = ("-p", "-sV", "-sS", "-sT", "-A")
@@ -114,7 +121,10 @@ class CommandFacts:
     """What a command line asserts, before any state grounding."""
 
     argv: Tuple[str, ...]
+    #: Basename of the recorded executable, which may be a shell.
     executable: str
+    #: Executables found in command position, including inside a shell wrapper.
+    tools: Tuple[str, ...]
     action_types: FrozenSet[ActionType]
     ips: Tuple[str, ...]
     cidrs: Tuple[str, ...]
@@ -136,21 +146,12 @@ def parse_command(record: Dict[str, Any]) -> Optional[CommandFacts]:
     executable = str(command.get("executable") or argv[0]).rsplit("/", 1)[-1]
     joined = " ".join(argv)
 
-    types = {
-        action_type
-        for action_type, executables in COMMAND_RULES.items()
-        if executable in executables
-    }
-    # nmap covers both discovery and service enumeration; the flags decide.
-    if executable in ("nmap", "masscan"):
-        if any(flag in argv for flag in _HOST_SCAN_FLAGS):
-            types.discard(ActionType.FindServices)
-        elif any(argument.startswith(_SERVICE_SCAN_FLAGS) for argument in argv):
-            types.discard(ActionType.ScanNetwork)
-    # curl/wget/nc read by default and write only when told to.
-    if executable in ("curl", "wget", "nc", "ncat"):
-        if not any(flag in argv for flag in _UPLOAD_FLAGS):
-            types.discard(ActionType.ExfiltrateData)
+    tools: List[str] = []
+    types: set = set()
+    for fragment in command_fragments(argv):
+        tool = fragment[0].rsplit("/", 1)[-1]
+        tools.append(tool)
+        types |= _action_types(tool, fragment)
 
     cidrs = tuple(f"{net}/{mask}" for net, mask in _CIDR.findall(joined))
     ips = tuple(
@@ -169,12 +170,110 @@ def parse_command(record: Dict[str, Any]) -> Optional[CommandFacts]:
     return CommandFacts(
         argv=argv,
         executable=executable,
+        tools=tuple(dict.fromkeys(tools)),
         action_types=frozenset(types),
         ips=ips,
         cidrs=cidrs,
         paths=paths,
         ports=_extract_ports(argv),
     )
+
+
+def _action_types(tool: str, fragment: Sequence[str]) -> set:
+    """Action types implied by one invocation, from its own arguments."""
+    types = {
+        action_type
+        for action_type, executables in COMMAND_RULES.items()
+        if tool in executables
+    }
+    # nmap covers both host discovery and service enumeration; flags decide.
+    if tool in ("nmap", "masscan"):
+        if any(flag in fragment for flag in _HOST_SCAN_FLAGS):
+            types.discard(ActionType.FindServices)
+        elif any(argument.startswith(_SERVICE_SCAN_FLAGS) for argument in fragment):
+            types.discard(ActionType.ScanNetwork)
+    # curl, wget and nc read by default and write only when told to.
+    if tool in ("curl", "wget", "nc", "ncat"):
+        if not any(flag in fragment for flag in _UPLOAD_FLAGS):
+            types.discard(ActionType.ExfiltrateData)
+    return types
+
+
+def command_fragments(argv: Sequence[str]) -> List[Tuple[str, ...]]:
+    """Split a tokenised command line into the individual invocations in it.
+
+    Records do not always name the tool that ran. An agent driving a shell
+    produces `sh -lc nmap -sV ... ; nmap -sV ...`, where `argv[0]` is the shell
+    and the record's `executable` is `/bin/sh`; in the observed LLM-agent run,
+    13 of 56 commands have this shape and name `nmap`, `curl` or `ping` only
+    inside the wrapper. Reading `argv[0]` alone therefore finds no tool and the
+    label loses its confirmation.
+
+    Fragments start at the beginning of the line and after each separator, so a
+    tool is only recognised in command position. That distinction matters: the
+    same run embeds a prompt listing `hydra` and `medusa` as tools the agent
+    must not use, and scanning the text for names would read those as
+    invocations.
+
+    Leading tokens that are not the invocation itself are skipped: the shell and
+    its options, a script path, `env`, `sudo`, `nohup`, `time`, and variable
+    assignments.
+    """
+    fragments: List[Tuple[str, ...]] = []
+    current: List[str] = []
+
+    def flush() -> None:
+        invocation = _strip_prefixes(current)
+        if invocation:
+            fragments.append(tuple(invocation))
+        current.clear()
+
+    for token in argv:
+        if token in SHELL_SEPARATORS:
+            flush()
+            continue
+        current.append(token)
+        # Redirections attach to the token, as in `2>/dev/null;`.
+        if token.endswith(";"):
+            current[-1] = token[:-1]
+            flush()
+    flush()
+    return fragments
+
+
+def _strip_prefixes(tokens: Sequence[str]) -> List[str]:
+    """Drop what precedes the invocation: shells, wrappers and assignments."""
+    remaining = [token for token in tokens if token]
+    while remaining:
+        head = remaining[0]
+        base = head.rsplit("/", 1)[-1]
+        if base in SHELLS:
+            remaining = remaining[1:]
+            # The shell's own options, such as `-lc` or `-e`.
+            while remaining and remaining[0].startswith("-"):
+                remaining = remaining[1:]
+            continue
+        if base in COMMAND_WRAPPERS:
+            remaining = remaining[1:]
+            continue
+        if base.endswith(".sh"):
+            remaining = remaining[1:]
+            continue
+        if "=" in head and not head.startswith("-") and "/" not in head.split("=")[0]:
+            remaining = remaining[1:]  # VAR=value
+            continue
+        if head.startswith("-"):
+            # An invocation never begins with an option, so this belongs to a
+            # prefix already dropped, as in `set -eu ip route ...`.
+            remaining = remaining[1:]
+            continue
+        break
+    return remaining
+
+
+def _tool_name(facts: CommandFacts) -> str:
+    """The tool a message should name: the inner one when a shell wrapped it."""
+    return facts.tools[0] if facts.tools else facts.executable
 
 
 def _extract_ports(argv: Sequence[str]) -> Tuple[int, ...]:
@@ -431,8 +530,8 @@ def label_transition(
                     result.unmappable.append(
                         Unmappable(
                             "command outside the NetSecGame action vocabulary",
-                            f"{facts.executable}: {facts.shell_text[:120]}",
-                            dict(evidence_base, executable=facts.executable),
+                            f"{_tool_name(facts)}: {facts.shell_text[:120]}",
+                            dict(evidence_base, executable=_tool_name(facts)),
                         )
                     )
 
@@ -523,7 +622,7 @@ def _blind_exfiltration(
             unmappable.append(
                 Unmappable(
                     "blind exfiltration of undiscovered data",
-                    f"{facts.executable} moved {path} from controlled {source_host}, but the "
+                    f"{_tool_name(facts)} moved {path} from controlled {source_host}, but the "
                     "file was never in known_data; NetSecGame enumerates exfiltration over discovered "
                     "data only, so the attempt has no representation",
                     dict(evidence_base, path=path, command=facts.shell_text),
@@ -762,7 +861,7 @@ def _remote_execution(
     """
     unmappable: List[Unmappable] = []
     for facts in commands:
-        if facts.executable not in REMOTE_EXECUTION:
+        if not (set(facts.tools) & REMOTE_EXECUTION):
             continue
         for address in facts.ips:
             host = IP(address)
@@ -771,7 +870,7 @@ def _remote_execution(
             unmappable.append(
                 Unmappable(
                     "command executed on another host",
-                    f"{facts.executable} ran a command on {host}, which the agent already "
+                    f"{_tool_name(facts)} ran a command on {host}, which the agent already "
                     "controls; the action taken there has a different source_host and is "
                     "not observed by this recording",
                     dict(evidence_base, host=str(host), command=facts.shell_text),
@@ -865,7 +964,7 @@ def _service_for_ports(
                 if digits and int(digits) in facts.ports:
                     return service
     for service in services:
-        if service.name.lower() == facts.executable.lower():
+        if service.name.lower() in {tool.lower() for tool in facts.tools}:
             return service
     return None
 
@@ -884,7 +983,7 @@ def _unmappable_scan_ranges(
                 unmappable.append(
                     Unmappable(
                         "scan of a range that is not a known network",
-                        f"{facts.executable} scanned {cidr}, which no known network contains; "
+                        f"{_tool_name(facts)} scanned {cidr}, which no known network contains; "
                         "NetSecGame's ScanNetwork is parameterized by a known network object",
                         dict(evidence_base, cidr=cidr, command=facts.shell_text),
                     )

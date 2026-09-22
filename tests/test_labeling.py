@@ -8,6 +8,7 @@ from nsg_surrogate import candidates
 from nsg_surrogate.labeling import (
     CommandFacts,
     Label,
+    command_fragments,
     infer_source_host,
     label_transition,
     merge_labels,
@@ -265,6 +266,84 @@ class CommandOnlyLabelTests(unittest.TestCase):
         self.assertEqual(
             len(result.labels[0].evidence.get("grounded_commands", [])), 2
         )
+
+
+class CommandFragmentTests(unittest.TestCase):
+    """Splitting a recorded command line into the invocations it contains.
+
+    An agent driving a shell records `sh -lc nmap ...`, so the tool that ran is
+    not `argv[0]`. Fragments are taken at command positions only, never by
+    searching the text for tool names.
+    """
+
+    def executables(self, argv):
+        return [fragment[0] for fragment in command_fragments(argv)]
+
+    def test_plain_invocation(self):
+        self.assertEqual(self.executables(["nmap", "-sn", "10.0.0.0/24"]), ["nmap"])
+
+    def test_shell_wrapper_is_skipped(self):
+        self.assertEqual(self.executables(["sh", "-lc", "nmap", "-sn", "10.0.0.0/24"]), ["nmap"])
+
+    def test_separator_tokens_split_invocations(self):
+        for separator in (";", "&&", "||", "|"):
+            with self.subTest(separator=separator):
+                argv = ["sh", "-lc", "cat", "/etc/passwd", separator, "grep", "root"]
+                self.assertEqual(self.executables(argv), ["cat", "grep"])
+
+    def test_separator_attached_to_a_redirection_splits(self):
+        """Real records carry `2>/dev/null;` as a single token."""
+        argv = [
+            "sh", "-lc", "nmap", "-sV", "-p", "22", "10.0.0.9", "-oN", "/tmp/a",
+            "2>/dev/null;", "nmap", "-sV", "-p", "8080", "10.0.0.8",
+        ]
+        self.assertEqual(self.executables(argv), ["nmap", "nmap"])
+
+    def test_env_assignments_and_wrappers_are_skipped(self):
+        argv = ["/usr/bin/bash", "-c", "env", "RUN_ID=x", "sh", "-lc", "nmap", "-sn", "10.0.0.0/24"]
+        self.assertEqual(self.executables(argv), ["nmap"])
+
+    def test_script_paths_and_builtin_options_are_skipped(self):
+        argv = [
+            "/bin/bash", "/usr/local/bin/entrypoint.sh", "sh", "-lc",
+            "set", "-eu", "ip", "route", "replace", "default",
+        ]
+        self.assertEqual(self.executables(argv), ["ip"])
+
+    def test_a_tool_named_in_prose_is_not_an_invocation(self):
+        """The observed run embeds a prompt listing tools the agent must not use."""
+        argv = [
+            "sh", "-lc", "cat", "/etc/policy",
+            "prompt:", "- `hydra`/`medusa`, broad scans and exfiltration are forbidden",
+        ]
+        facts = parse_command({"command": {"argv": argv, "executable": "sh"}})
+        self.assertEqual(facts.tools, ("cat",))
+        self.assertNotIn(ActionType.ExploitService, facts.action_types)
+
+    def test_each_invocation_contributes_its_own_action_type(self):
+        argv = ["sh", "-lc", "nmap", "-sn", "10.0.0.0/24", ";", "nmap", "-sV", "-p", "22", "10.0.0.9"]
+        facts = parse_command({"command": {"argv": argv, "executable": "sh"}})
+        self.assertEqual(
+            facts.action_types,
+            frozenset({ActionType.ScanNetwork, ActionType.FindServices}),
+            "flags are read per invocation, not across the whole line",
+        )
+
+    def test_tools_are_reported_in_order_without_repeats(self):
+        argv = ["sh", "-lc", "nmap", "-sn", "10.0.0.0/24", ";", "nmap", "-sn", "10.0.1.0/24"]
+        facts = parse_command({"command": {"argv": argv, "executable": "sh"}})
+        self.assertEqual(facts.tools, ("nmap",))
+
+    def test_executable_still_reports_what_was_recorded(self):
+        argv = ["sh", "-lc", "nmap", "-sn", "10.0.0.0/24"]
+        facts = parse_command({"command": {"argv": argv, "executable": "/bin/sh"}})
+        self.assertEqual(facts.executable, "sh")
+        self.assertEqual(facts.tools, ("nmap",))
+
+    def test_empty_and_separator_only_input(self):
+        self.assertEqual(command_fragments([]), [])
+        self.assertEqual(command_fragments([";", "&&"]), [])
+        self.assertEqual(command_fragments(["sh", "-lc"]), [])
 
 
 class CommandParsingTests(unittest.TestCase):
