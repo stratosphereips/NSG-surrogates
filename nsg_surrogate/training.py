@@ -35,12 +35,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 
-from netsecgame.game_components import Action, GameState
+from netsecgame.game_components import Action, Data, GameState, IP
 
 from . import candidates as candidates_mod
 from . import factorization
 from .attempt_counts import AttemptCounts
-from .dataset import read_pairs
+from .dataset import _with_controlled, _with_data, read_pairs
 from .encoder import state_summary, state_to_pyg
 from .factorization import HeadTargets
 from .policy import FactoredGNNPolicy
@@ -132,11 +132,18 @@ def load_samples(
                 )
                 projections[key] = projection
 
+            # Reproduce the trajectory-derived augmentation the builder applied
+            # (hosts controlled by executing a command on them; files read off a
+            # remote host). The graph alone does not carry these, so they are
+            # replayed from the row's `derived` block onto the re-projected base.
+            train_state = _apply_derived(projection.state, (row.get("projection_cache") or {}).get("derived"))
+
             cached = (row.get("projection_cache") or {}).get("game_state")
-            if cached is not None and not _same_state(cached, projection.state):
+            if cached is not None and not _same_state(cached, train_state):
                 # The adapter has changed since the dataset was written. Not
-                # fatal — the graph is the source of truth and has just been
-                # re-projected — but the caller should know the rows are stale.
+                # fatal — the graph plus the derived block is the source of
+                # truth and has just been reproduced — but the caller should
+                # know the rows are stale.
                 report.projection_mismatches += 1
 
             try:
@@ -145,10 +152,9 @@ def load_samples(
                 skipped[f"unreadable label ({type(error).__name__})"] += 1
                 continue
 
-            actions = candidates_mod.enumerate_actions(projection.state)
-            targets = factorization.head_targets(
-                action, actions, _object_to_idx(projection)
-            )
+            object_to_idx = _object_to_idx_for(train_state, projection.provenance)
+            actions = candidates_mod.enumerate_actions(train_state)
+            targets = factorization.head_targets(action, actions, object_to_idx)
             if targets is None:
                 # The label is not reachable through the factorization from this
                 # state — training on it would optimise an index that decodes to
@@ -163,7 +169,7 @@ def load_samples(
                     run_id=run_id,
                     pair_id=str(row.get("pair_id", "")),
                     state_id=state_id,
-                    state=projection.state,
+                    state=train_state,
                     projection=projection,
                     action=action,
                     candidates=actions,
@@ -217,6 +223,27 @@ def _same_state(cached: Dict[str, Any], state: GameState) -> bool:
         return GameState.from_json(json.dumps(cached)) == state
     except Exception:
         return False
+
+
+def _apply_derived(state: GameState, derived: Optional[Dict[str, Any]]) -> GameState:
+    """Replay the builder's trajectory-derived augmentation onto a base state."""
+    if not derived:
+        return state
+    controlled = {IP(h) for h in derived.get("controlled_hosts", [])}
+    if controlled:
+        state = _with_controlled(state, controlled)
+    data = {
+        host: {Data(owner=host, id=i, size=0, type="file", content=i) for i in ids}
+        for host, ids in (derived.get("known_data") or {}).items()
+    }
+    if data:
+        state = _with_data(state, data)
+    return state
+
+
+def _object_to_idx_for(state: GameState, provenance) -> Dict[str, dict]:
+    _, object_to_idx, _ = state_to_pyg(state, provenance=provenance)
+    return object_to_idx
 
 
 def _object_to_idx(projection: Projection) -> Dict[str, dict]:

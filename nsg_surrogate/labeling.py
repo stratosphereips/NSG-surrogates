@@ -34,7 +34,7 @@ import netaddr
 from netsecgame.game_components import Action, ActionType, Data, GameState, IP, Network, Service
 
 from .candidates import action_key, contains, enumerate_actions
-from .state_adapter import Provenance
+from .state_adapter import Provenance, _routable_ipv4s
 from .state_diff import StateDiff
 
 #: Executable name to the action type its use implies, matched on the basename.
@@ -130,6 +130,13 @@ class CommandFacts:
     cidrs: Tuple[str, ...]
     paths: Tuple[str, ...]
     ports: Tuple[int, ...]
+    #: Routable IPv4 addresses of the host the command actually ran on, from the
+    #: record's `execution_host` / `host_chain`. Empty when the record predates
+    #: those fields; then the executing host is the observed container.
+    execution_hosts: Tuple[str, ...] = ()
+    #: Routable IPv4 address of the host the agent operates from (the observed
+    #: container), from the record's `agent_origin_host`.
+    origin_host: Optional[str] = None
 
     @property
     def shell_text(self) -> str:
@@ -176,7 +183,120 @@ def parse_command(record: Dict[str, Any]) -> Optional[CommandFacts]:
         cidrs=cidrs,
         paths=paths,
         ports=_extract_ports(argv),
+        execution_hosts=_execution_hosts(record),
+        origin_host=(_host_addresses(record.get("agent_origin_host")) or [None])[0],
     )
+
+
+#: Reading a file off a remote host and bringing its content back to the acting
+#: host is exfiltration, even though the agent reads it in place rather than
+#: copying a discovered Data object to a drop box. These invocations transfer a
+#: file from the execution host to the origin.
+READ_TRANSFER_TOOLS = frozenset({"cat", "head", "tail", "scp", "sftp"})
+
+
+def read_exfiltration_events(
+    commands: Sequence["CommandFacts"], controlled: Iterable[IP]
+) -> List[Tuple[IP, IP, str]]:
+    """Remote file reads that move data to the acting host.
+
+    Returns `(source, target, path)` for each file read on a controlled remote
+    host and returned to the controlled origin — e.g.
+    `ssh labuser@10.0.0.9 'cat /srv/secret'` run from the origin. Source is the
+    execution host (where the file is), target is the agent's origin host; both
+    must be controlled. This is the exfiltration the agents actually perform;
+    the content leaves `source` and reaches `target`.
+    """
+    controlled_set = set(controlled)
+    events: List[Tuple[IP, IP, str]] = []
+    for facts in commands:
+        origin = IP(facts.origin_host) if facts.origin_host else None
+        for source_addr in facts.execution_hosts:
+            source = IP(source_addr)
+            if source not in controlled_set:
+                continue
+            target = origin if origin is not None else None
+            if target is None or target == source or target not in controlled_set:
+                continue
+            for path in _remote_read_paths(facts):
+                events.append((source, target, path))
+    # Deduplicate, preserving order.
+    seen = set()
+    unique = []
+    for event in events:
+        key = (str(event[0]), str(event[1]), event[2])
+        if key not in seen:
+            seen.add(key)
+            unique.append(event)
+    return unique
+
+
+def _remote_read_paths(facts: "CommandFacts") -> List[str]:
+    """File paths read by a transfer command, from its remote command text.
+
+    `ssh host 'cat /a /b'` carries the remote command as one argv token, so the
+    paths are not split into `facts.paths`; they are recovered from the token.
+    `scp host:/path local` names the path directly.
+    """
+    tools = set(facts.tools)
+    if not (tools & READ_TRANSFER_TOOLS or {"ssh", "sshpass"} & tools):
+        return []
+    paths: List[str] = []
+
+    def add(raw: str) -> None:
+        # Strip shell punctuation and quotes that cling to a path token
+        # ("/srv/scl-data;", "'/etc/passwd'"), and reject anything that is not a
+        # plausible absolute file path.
+        cleaned = raw.strip().strip("\"';|&()`").rstrip(";|&")
+        if cleaned.startswith("/") and len(cleaned) > 1 and cleaned not in paths:
+            paths.append(cleaned)
+
+    for token in facts.argv:
+        # scp/sftp remote spec: host:/path
+        if re.match(r"^[\w.@-]+:/", token):
+            add(token.split(":", 1)[1])
+        # a remote command string that reads files: "cat /a /b; tail -1 /c"
+        elif any(token.strip().startswith(t + " ") for t in READ_TRANSFER_TOOLS):
+            for part in token.split():
+                add(part)
+    # Fall back to parsed absolute paths when the command was not quoted.
+    if not paths:
+        for part in facts.paths:
+            add(part)
+    return paths
+
+
+def _host_addresses(entry: Any) -> List[str]:
+    """Routable IPv4 addresses named by one host descriptor.
+
+    The attribution fields use two shapes: a full descriptor with an
+    `addresses` list (`source_host`), and a compact `{address, host}` form
+    (`execution_host` when the host is only known by IP).
+    """
+    if not isinstance(entry, dict):
+        return []
+    raw = entry.get("addresses")
+    if raw is None:
+        raw = [entry.get("address") or entry.get("host")]
+    return list(_routable_ipv4s(str(a) for a in raw if a))
+
+
+def _execution_hosts(record: Dict[str, Any]) -> Tuple[str, ...]:
+    """Where the command ran, from `execution_host` then `host_chain`'s tail.
+
+    Prefers `execution_host`; falls back to the last element of `host_chain`,
+    which is the far end of a pivot. Returns the routable IPv4 addresses so the
+    caller can test membership against `controlled_hosts`.
+    """
+    addresses = _host_addresses(record.get("execution_host"))
+    if not addresses:
+        for entry in record.get("execution_hosts") or ():
+            addresses.extend(_host_addresses(entry))
+    if not addresses:
+        chain = record.get("host_chain") or ()
+        if chain:
+            addresses = _host_addresses(chain[-1])
+    return tuple(dict.fromkeys(addresses))
 
 
 def _action_types(tool: str, fragment: Sequence[str]) -> set:
@@ -310,7 +430,12 @@ def label_transition(
     """Label one observed transition, and categorise what cannot be labelled."""
     result = LabelResult()
     candidates = enumerate_actions(before, canonicalize_exploit_services=False)
-    source_host, source_note = infer_source_host(before, provenance)
+    executing_hosts = {
+        IP(address)
+        for facts in commands
+        for address in facts.execution_hosts
+    }
+    source_host, source_note = infer_source_host(before, provenance, executing_hosts)
     evidence_base = dict(docker_evidence or {})
     if commands:
         evidence_base["commands"] = [facts.shell_text for facts in commands[:8]]
@@ -494,6 +619,22 @@ def label_transition(
             0.85,
             extra_evidence={"data": item.id, "from": str(origin), "to": str(destination)},
         )
+
+    # ── read-based exfiltration: data pulled from a controlled remote host ─────
+    for source, target, path in read_exfiltration_events(commands, before.controlled_hosts):
+        data = Data(owner=str(source), id=path, size=0, type="file", content=path)
+        action = Action(
+            ActionType.ExfiltrateData,
+            {"source_host": source, "target_host": target, "data": data},
+        )
+        if contains(candidates, action):
+            emit(
+                action,
+                ActionType.ExfiltrateData,
+                0.6,
+                notes=("exfiltration by reading a file from a controlled remote host",),
+                extra_evidence={"data": path, "from": str(source), "to": str(target)},
+            )
 
     # ── blocks: defender vocabulary ───────────────────────────────────────────
     for host, blocked in sorted(diff.new_blocks.items(), key=lambda kv: str(kv[0])):
@@ -779,31 +920,36 @@ def _ground_command(
 
 
 def infer_source_host(
-    before: GameState, provenance: Optional[Provenance]
+    before: GameState,
+    provenance: Optional[Provenance],
+    executing_hosts: Iterable[IP] = (),
 ) -> Tuple[Optional[IP], Optional[str]]:
     """Determine which host issued the action.
 
-    A recording is produced by an observer inside one container, so the commands
-    it captures were executed in that container, which the state creator
-    identifies as `host:local`. That host is therefore preferred.
+    When the recording names where the command ran (`execution_host` /
+    `host_chain`, read into `executing_hosts`), that host is authoritative:
+    the observer follows the agent across a pivot, so the executing host is the
+    action's `source_host`. It is used when it is a controlled host in the
+    projected state.
 
-    It does not follow that a trajectory concerns a single machine. An agent that
-    gains control of a second host acts from there as well, and the recorded
-    evidence does not currently identify the issuing host: an action record
-    carries `actor`, `targets` and `scope`, none of which names it. The observer
-    is intended to follow the agent, at which point the source should be read
-    from the record instead of preferred here — see `docs/poc-findings.md`
-    finding 21 for the fields that would be needed.
+    A recorded executing host that is *not* controlled is a command run on a host
+    the projection does not represent as controlled — a pivot the state graph has
+    not yet reflected. It cannot be a NetSecGame `source_host`, so it is not
+    forced; the caller reports the transition as unmappable instead.
 
-    Consequently the choice is recorded as a note whenever the state contains
-    more than one controlled host, even when a local host is identified: the
-    recording cannot establish that the local host was the one that acted. Where
-    the host cannot be determined at all, `None` is returned and the transition
-    is reported as unmappable rather than attributed arbitrarily.
+    Without the field, the observed container is preferred (a recording is
+    produced by an observer inside one container), and the choice is recorded as
+    a note whenever more than one host is controlled, because the recording then
+    cannot establish which one acted.
     """
     controlled = sorted(before.controlled_hosts, key=str)
     if not controlled:
         return None, None
+
+    recorded = [host for host in executing_hosts if host in before.controlled_hosts]
+    if recorded:
+        chosen = sorted(recorded, key=str)[0]
+        return chosen, None
 
     local_controlled = (
         sorted(provenance.local_hosts & set(before.controlled_hosts), key=str)

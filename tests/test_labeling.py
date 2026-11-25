@@ -13,6 +13,7 @@ from nsg_surrogate.labeling import (
     label_transition,
     merge_labels,
     parse_command,
+    read_exfiltration_events,
 )
 from nsg_surrogate.state_adapter import Provenance
 from nsg_surrogate.state_diff import diff_states, lost_knowledge
@@ -385,6 +386,76 @@ class CommandParsingTests(unittest.TestCase):
 
     def test_record_without_argv(self):
         self.assertIsNone(parse_command({"command": {}}))
+
+
+class ReadExfiltrationTests(unittest.TestCase):
+    """Reading a file off a controlled remote host and returning it is exfil."""
+
+    def _cmd(self, argv, execution, origin):
+        return parse_command({
+            "command": {"argv": argv, "executable": argv[0]},
+            "execution_host": {"address": execution},
+            "agent_origin_host": {"addresses": [origin]},
+        })
+
+    def test_ssh_cat_pull_is_an_exfiltration_event(self):
+        cmd = self._cmd(
+            ["sshpass", "-p", "x", "ssh", "labuser@10.0.0.9", "cat /srv/secret.txt"],
+            execution="10.0.0.9", origin="10.0.0.5",
+        )
+        events = read_exfiltration_events([cmd], controlled={IP("10.0.0.5"), IP("10.0.0.9")})
+        self.assertEqual(events, [(IP("10.0.0.9"), IP("10.0.0.5"), "/srv/secret.txt")])
+
+    def test_multiple_files_are_separate_events(self):
+        cmd = self._cmd(
+            ["sshpass", "ssh", "labuser@10.0.0.9", "cat /a/one.txt /b/two.txt"],
+            execution="10.0.0.9", origin="10.0.0.5",
+        )
+        events = read_exfiltration_events([cmd], controlled={IP("10.0.0.5"), IP("10.0.0.9")})
+        self.assertEqual(
+            sorted(e[2] for e in events), ["/a/one.txt", "/b/two.txt"]
+        )
+
+    def test_shell_punctuation_is_stripped_from_paths(self):
+        cmd = self._cmd(
+            ["sshpass", "ssh", "labuser@10.0.0.9", "cat /srv/data; echo done"],
+            execution="10.0.0.9", origin="10.0.0.5",
+        )
+        paths = [e[2] for e in read_exfiltration_events([cmd], controlled={IP("10.0.0.5"), IP("10.0.0.9")})]
+        self.assertEqual(paths, ["/srv/data"])
+
+    def test_no_event_when_source_not_controlled(self):
+        cmd = self._cmd(
+            ["sshpass", "ssh", "labuser@10.0.0.9", "cat /srv/secret.txt"],
+            execution="10.0.0.9", origin="10.0.0.5",
+        )
+        self.assertEqual(read_exfiltration_events([cmd], controlled={IP("10.0.0.5")}), [])
+
+    def test_no_event_for_a_purely_local_read(self):
+        cmd = self._cmd(["cat", "/etc/passwd"], execution="10.0.0.5", origin="10.0.0.5")
+        self.assertEqual(read_exfiltration_events([cmd], controlled={IP("10.0.0.5")}), [])
+
+    def test_exfiltration_label_emitted_when_data_is_present(self):
+        """With the read file known on the controlled source, exfil is a candidate."""
+        secret = Data(owner="10.0.0.9", id="/srv/secret.txt", size=0, type="file", content="")
+        before = base_state(
+            controlled_hosts={LOCAL, IP("10.0.0.9")},
+            known_hosts={LOCAL, IP("10.0.0.9")},
+            known_data={IP("10.0.0.9"): {secret}},
+        )
+        cmd = self._cmd(
+            ["sshpass", "ssh", "labuser@10.0.0.9", "cat /srv/secret.txt"],
+            execution="10.0.0.9", origin=str(LOCAL),
+        )
+        result = label_transition(
+            before, before, diff_states(before, before), commands=[cmd], provenance=provenance()
+        )
+        exfil = [l for l in result.labels if l.action.type == ActionType.ExfiltrateData]
+        self.assertEqual(len(exfil), 1)
+        a = exfil[0].action.parameters
+        self.assertEqual(a["source_host"], IP("10.0.0.9"))
+        self.assertEqual(a["target_host"], LOCAL)
+        self.assertEqual(a["data"].id, "/srv/secret.txt")
 
 
 class SourceHostTests(unittest.TestCase):

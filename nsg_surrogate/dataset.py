@@ -26,10 +26,21 @@ import hashlib
 import json
 import os
 import shutil
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+import ipaddress
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from .candidates import breakdown, enumerate_actions
-from .labeling import CommandFacts, Label, LabelResult, Unmappable, label_transition, parse_command
+from .labeling import (
+    CommandFacts,
+    Label,
+    LabelResult,
+    Unmappable,
+    label_transition,
+    parse_command,
+    read_exfiltration_events,
+)
+from netsecgame.game_components import Data, GameState, IP
+
 from .state_adapter import AdapterConfig, Projection, project_graph_to_game_state
 from .state_diff import diff_states, lost_knowledge
 
@@ -215,6 +226,7 @@ def build(
     config: Optional[AdapterConfig] = None,
     run_id: Optional[str] = None,
     max_records_per_transition: Optional[int] = 200,
+    control_from_execution: bool = True,
 ) -> BuildResult:
     """Walk one observation run and produce labelled pairs plus a report."""
     config = config or AdapterConfig()
@@ -246,6 +258,12 @@ def build(
 
     projections: Dict[str, Projection] = {}
     config_hash = _config_hash(config)
+    scope = _parsed_scope(config.scope_cidrs)
+    # Hosts the agent has run a command on earlier in the trajectory. Successful
+    # authenticated access (execution_host set on a record) is control, which the
+    # state graph does not yet record (poc-findings finding 21), so it is derived
+    # here instead and accumulates forward in trajectory order.
+    controlled_from_access: Set[IP] = set()
 
     def projection_for(state_id: str) -> Optional[Projection]:
         if state_id in projections:
@@ -269,6 +287,39 @@ def build(
             adapter_notes[_note_key(note)] += 1
 
         before, after = before_projection.state, after_projection.state
+
+        bucket_for_control = grouped.get((before_id, after_id)) or TransitionActions()
+        if control_from_execution:
+            for facts in bucket_for_control.commands:
+                for address in facts.execution_hosts:
+                    if _host_in_scope(address, scope):
+                        controlled_from_access.add(IP(address))
+            if controlled_from_access:
+                before = _with_controlled(before, controlled_from_access)
+                after = _with_controlled(after, controlled_from_access)
+
+        # Data read off a controlled remote host and returned to the origin is
+        # exfiltration (poc-findings finding 17). The read file is not in the
+        # projected state, so it is synthesised here on the source host, which
+        # makes the ExfiltrateData action a valid candidate. The additions are
+        # recorded in `derived` so the trainer reproduces the same state.
+        read_data: Dict[str, Set[Data]] = {}
+        if control_from_execution:
+            for src, _tgt, path in read_exfiltration_events(
+                bucket_for_control.commands, before.controlled_hosts
+            ):
+                read_data.setdefault(str(src), set()).add(
+                    Data(owner=str(src), id=path, size=0, type="file", content=path)
+                )
+            if read_data:
+                before = _with_data(before, read_data)
+                after = _with_data(after, read_data)
+
+        derived = {
+            "controlled_hosts": sorted(str(h) for h in controlled_from_access),
+            "known_data": {h: sorted(d.id for d in items) for h, items in read_data.items()},
+        }
+
         diff = diff_states(before, after)
         for category, count in lost_knowledge(before, after).items():
             if count:
@@ -306,13 +357,14 @@ def build(
         if not labelling.labels:
             report.transitions_with_no_label += 1
 
-        candidate_actions = enumerate_actions(before)
+        candidate_actions = enumerate_actions(before)  # 'before' is augmented above
         for index, label in enumerate(labelling.labels):
             row = _row(
                 run_id=run_id,
                 index=index,
                 before_id=before_id,
                 after_id=after_id,
+                before_state=before,
                 before_projection=before_projection,
                 after_projection=after_projection,
                 diff=diff,
@@ -323,6 +375,7 @@ def build(
                 candidate_actions=candidate_actions,
                 config_hash=config_hash,
                 trajectory_dir=trajectory_dir,
+                derived=derived,
             )
             result.rows.append(row)
             label_sources[label.label_source] += 1
@@ -357,6 +410,7 @@ def _row(
     index: int,
     before_id: str,
     after_id: str,
+    before_state: GameState,
     before_projection: Projection,
     after_projection: Projection,
     diff,
@@ -365,6 +419,7 @@ def _row(
     candidate_actions: Sequence[Any],
     config_hash: str,
     trajectory_dir: str,
+    derived: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "schema_version": PAIR_SCHEMA_VERSION,
@@ -379,10 +434,11 @@ def _row(
         "projection_cache": {
             "adapter_version": ADAPTER_VERSION,
             "config_hash": config_hash,
-            "game_state": canonical_game_state(before_projection.state),
+            "game_state": canonical_game_state(before_state),
             "candidate_count": len(candidate_actions),
             "candidate_breakdown": breakdown(candidate_actions),
             "label_in_candidates": True,
+            "derived": derived or {"controlled_hosts": [], "known_data": {}},
         },
     }
 
@@ -519,3 +575,67 @@ def _note_key(note: str) -> str:
         if marker in note:
             return note.split(marker)[0] + marker.rstrip() + " …"
     return note[:80]
+
+
+def _parsed_scope(cidrs) -> Tuple[ipaddress.IPv4Network, ...]:
+    out = []
+    for cidr in sorted(cidrs or ()):
+        try:
+            out.append(ipaddress.IPv4Network(cidr, strict=False))
+        except ValueError:
+            continue
+    return tuple(out)
+
+
+def _host_in_scope(address: str, scope: Tuple[ipaddress.IPv4Network, ...]) -> bool:
+    """A routable IPv4 address, inside the declared scope when one is set."""
+    try:
+        parsed = ipaddress.IPv4Address(address)
+    except ValueError:
+        return False
+    if parsed.is_loopback or parsed.is_link_local or parsed.is_multicast:
+        return False
+    return not scope or any(parsed in net for net in scope)
+
+
+def _with_data(state: GameState, extra_data: Dict[str, Set[Data]]) -> GameState:
+    """A copy of `state` with `extra_data` added to known_data (and the owning
+    hosts to known/controlled). Used to make a read file a valid exfiltration
+    source (see `build`).
+    """
+    if not extra_data:
+        return state
+    known_data = {h: set(v) for h, v in state.known_data.items()}
+    hosts = set(state.known_hosts)
+    controlled = set(state.controlled_hosts)
+    for host, items in extra_data.items():
+        known_data.setdefault(IP(host), set()).update(items)
+        hosts.add(IP(host))
+        controlled.add(IP(host))
+    return GameState(
+        controlled_hosts=controlled,
+        known_hosts=hosts,
+        known_services=dict(state.known_services),
+        known_data=known_data,
+        known_networks=set(state.known_networks),
+        known_blocks=dict(state.known_blocks),
+    )
+
+
+def _with_controlled(state: GameState, extra_controlled: Set[IP]) -> GameState:
+    """A copy of `state` with `extra_controlled` added to controlled/known hosts.
+
+    Control gained by running a command on a host (see `build`) is applied to the
+    projected state so that the host's reads, service enumeration and further
+    exploitation become valid NetSecGame actions attributed to it.
+    """
+    if extra_controlled <= state.controlled_hosts:
+        return state
+    return GameState(
+        controlled_hosts=set(state.controlled_hosts) | extra_controlled,
+        known_hosts=set(state.known_hosts) | extra_controlled,
+        known_services=dict(state.known_services),
+        known_data=dict(state.known_data),
+        known_networks=set(state.known_networks),
+        known_blocks=dict(state.known_blocks),
+    )
