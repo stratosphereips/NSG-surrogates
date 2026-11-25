@@ -272,6 +272,9 @@ def cmd_train(args: argparse.Namespace) -> int:
     from .policy import FactoredGNNPolicy
 
     policy = FactoredGNNPolicy()
+    weights_path = None if args.no_write else (args.out or os.path.join(MODELS_DIR, f"{args.name}.pth"))
+    if weights_path:
+        os.makedirs(os.path.dirname(os.path.abspath(weights_path)) or ".", exist_ok=True)
     result = training.train(
         train_samples,
         holdout=holdout,
@@ -281,6 +284,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         policy=policy,
         load=load_report,
         verbose=not args.quiet,
+        checkpoint_path=weights_path,
     )
 
     print()
@@ -301,7 +305,6 @@ def cmd_train(args: argparse.Namespace) -> int:
     if args.no_write:
         return 0
 
-    weights_path = args.out or os.path.join(MODELS_DIR, f"{args.name}.pth")
     result.weights_path = training.save(policy, weights_path)
     print(f"weights -> {result.weights_path}")
 
@@ -449,9 +452,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     play_parser.add_argument(
         "--temperature",
-        default=0.1,
+        default=0.7,
         type=float,
-        help="low-temperature sampling keeps the policy near-greedy without the "
+        help="sampling temperature. The default samples rather than running "
+        "near-greedy, which collapses an imbalanced or undertrained factored policy "
         "argmax lock-in that factored action spaces suffer from",
     )
     play_parser.add_argument(

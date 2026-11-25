@@ -469,6 +469,7 @@ def train(
     policy: Optional[FactoredGNNPolicy] = None,
     load: Optional[LoadReport] = None,
     verbose: bool = True,
+    checkpoint_path: Optional[str] = None,
 ) -> TrainResult:
     """Fit the four heads by masked cross-entropy.
 
@@ -529,6 +530,9 @@ def train(
         result.epochs.append(record)
         if verbose:
             print(f"epoch {epoch:>3}  loss {record['loss']:<9} {record.get('per_head', {})}")
+        if checkpoint_path:
+            # Save after every epoch so an interrupted run leaves a usable model.
+            save(policy, checkpoint_path)
 
     result.train_eval = evaluate(policy, samples)
     result.holdout_eval = evaluate(policy, holdout)
