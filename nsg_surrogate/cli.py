@@ -272,6 +272,19 @@ def cmd_train(args: argparse.Namespace) -> int:
     from .policy import FactoredGNNPolicy
 
     policy = FactoredGNNPolicy()
+    if args.init_weights:
+        import torch
+
+        from .encoder import state_summary, state_to_pyg
+
+        sample = train_samples[0]
+        graph, object_to_idx, _ = state_to_pyg(
+            sample.state, attempt_counts=sample.attempt_counts, provenance=sample.projection.provenance
+        )
+        summary = state_summary(sample.state, provenance=sample.projection.provenance)
+        policy.decide(graph, object_to_idx, sample.candidates, summary=summary)  # materialise lazy params
+        policy.load_state_dict(torch.load(args.init_weights, map_location="cpu", weights_only=False))
+        print(f"resumed from {args.init_weights}")
     weights_path = None if args.no_write else (args.out or os.path.join(MODELS_DIR, f"{args.name}.pth"))
     if weights_path:
         os.makedirs(os.path.dirname(os.path.abspath(weights_path)) or ".", exist_ok=True)
@@ -435,6 +448,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument(
         "--no-write", action="store_true", help="train and report without saving anything"
+    )
+    train.add_argument(
+        "--init-weights",
+        default=None,
+        metavar="PATH",
+        help="warm-start from an existing checkpoint instead of random init",
     )
     train.add_argument("--quiet", action="store_true")
     train.set_defaults(func=cmd_train)
